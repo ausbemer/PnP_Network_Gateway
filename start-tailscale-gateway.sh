@@ -81,6 +81,23 @@ docker run -d \
     tailscale/tailscale:latest
 
 echo "Tailscale gateway started (container: ${CONTAINER_NAME})."
+
+# ── 6. Masquerade tailnet traffic leaving via the LAN interface ───────────────
+#
+# Tailscale's own --snat-subnet-routes does not reliably install the masquerade
+# rule when running in a host-network container on nftables-based systems, so we
+# add it ourselves. Without this, forwarded packets keep their 100.64.0.0/10
+# (CGNAT) source address, LAN hosts try to reply via their own default gateway,
+# and the return traffic is lost.
+#
+# Scope: only tailnet-sourced traffic (100.64.0.0/10 is Tailscale's fixed CGNAT
+# range) leaving the detected interface. The -C check keeps it idempotent so the
+# rule is not duplicated on every service restart.
+
+echo "Ensuring SNAT (masquerade) for tailnet traffic out ${IFACE}..."
+iptables -t nat -C POSTROUTING -s 100.64.0.0/10 -o "${IFACE}" -j MASQUERADE 2>/dev/null \
+    || iptables -t nat -A POSTROUTING -s 100.64.0.0/10 -o "${IFACE}" -j MASQUERADE
+
 echo ""
 echo "NEXT STEPS:"
 echo "  1. Check status  : docker logs -f ${CONTAINER_NAME}"
