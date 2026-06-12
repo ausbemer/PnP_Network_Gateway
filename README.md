@@ -1,1 +1,76 @@
-# PnP_Netowrk_Gateway
+# PnP Network Gateway
+
+A plug-and-play Raspberry Pi that acts as a [Tailscale](https://tailscale.com)
+subnet router. Flash a Pi, give it an auth key, drop it onto any network — it
+boots, detects its local subnet, and advertises that subnet to your tailnet so
+you can reach everything on that LAN from anywhere.
+
+The Tailscale node runs in a Docker container, started by a systemd service that
+waits for DHCP, auto-detects the interface and subnet, and brings the route up
+with kernel-level forwarding.
+
+## How it works
+
+On boot, `tailscale-gateway.service` waits for the network to come online, then
+runs `start-tailscale-gateway.sh`, which:
+
+1. Finds the interface holding the default route (the one DHCP configured).
+2. Derives the directly-connected subnet for that interface.
+3. Reads the auth key from `/etc/tailscale-gateway/authkey`.
+4. Starts `tailscale/tailscale` in a host-network container advertising that
+   subnet, with state persisted in a named Docker volume.
+
+IP forwarding (required for subnet routing) is enabled via a sysctl drop-in.
+
+## Repository layout
+
+| File | Purpose |
+|------|---------|
+| `start-tailscale-gateway.sh`     | Core startup script — detects subnet, runs the container. |
+| `tailscale-gateway.service`      | systemd unit; starts after `network-online.target`, retries on failure. |
+| `99-ip-forward.conf`             | sysctl drop-in enabling IPv4/IPv6 forwarding. |
+| `install.sh`                     | Installs the service onto a running Pi (optionally with a key). |
+| `prepare-image.sh`               | Bakes a Pi into a reusable golden image (Docker + deps + service, no key). |
+| `tailscale-gateway-firstrun.sh`  | `/etc/profile.d` prompt that asks for an auth key on first SSH login. |
+| `BUILD-IMAGE.md`                 | Full walkthrough for building and deploying the custom image. |
+
+## Quick start (single Pi)
+
+Install onto a Pi that already has Docker:
+
+```bash
+git clone https://github.com/ausbemer/PnP_Network_Gateway.git
+cd PnP_Network_Gateway
+sudo bash install.sh --authkey tskey-auth-xxxxxxxxxxxx
+```
+
+Check it:
+
+```bash
+systemctl status tailscale-gateway
+docker logs -f tailscale-gateway
+```
+
+Then approve the advertised route in the
+[Tailscale admin console](https://login.tailscale.com/admin/machines), or set
+`autoApprovers` in your ACL policy to skip that step.
+
+## Reusable image (many Pis)
+
+To build one image you can flash onto any number of Pis — each prompting for its
+own auth key on first SSH login — see **[BUILD-IMAGE.md](BUILD-IMAGE.md)**. In
+short: run `prepare-image.sh` on a configured Pi, shut down, then capture and
+shrink the SD card to a `.img`.
+
+## Security notes
+
+- **Never commit an auth key.** Keys live only at `/etc/tailscale-gateway/authkey`
+  (chmod 600) on a running Pi. The `.gitignore` blocks `authkey`, `tskey-*`, and
+  `*.img` files.
+- Use a **reusable, pre-authorized** key when deploying multiple gateways.
+
+## Requirements
+
+- Raspberry Pi running Raspberry Pi OS Lite (64-bit recommended)
+- Docker
+- A Tailscale account and auth key

@@ -1,0 +1,27 @@
+# ── Secrets — NEVER commit a Tailscale auth key ───────────────────────────────
+authkey
+*authkey*
+*.key
+tskey-*
+
+# ── Disk images & captures (large, may contain node state) ────────────────────
+*.img
+*.img.*
+*.iso
+*.zip
+*.xz
+*.gz
+
+# ── PiShrink tooling fetched during build ─────────────────────────────────────
+pishrink.sh
+
+# ── OS / editor cruft ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
+
+# Local conversation handoff notes — not part of the repo
+CONTEXT.md
