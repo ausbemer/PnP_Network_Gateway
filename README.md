@@ -28,6 +28,31 @@ subnet and restarts the gateway to advertise it — no power cycle required. (Ea
 new subnet still needs route approval; use `autoApprovers` in your ACL so this
 happens automatically.)
 
+### Networks without DHCP
+
+If no DHCP lease appears within ~15 seconds, `tailscale-gateway-autonet`
+passively sniffs the segment (ARP, directed broadcasts, LLDP/CDP, IPv6 router
+advertisements) to infer the subnet and gateway, picks an unused address using
+RFC 5227 Address Conflict Detection, configures it tentatively, verifies it can
+actually reach the internet, and only then commits (via NetworkManager when
+present). This is heuristic — a completely silent segment can't be inferred, and
+the netmask defaults to /24 unless a directed broadcast or LLDP indicates
+otherwise.
+
+### Status dashboard
+
+A companion container (`tailscale-gateway-dashboard`) serves a small web UI that
+shows, at a glance: the device's Tailscale address, the LAN interface, subnet,
+gateway, internet status, and a live `arp-scan` of every device on the local
+subnet — each linked to `http://<ip>` so you can jump straight to its admin page
+over the tailnet.
+
+It binds **only to the Pi's Tailscale interface**, so it's reachable solely by
+members of your tailnet — that membership is the access control, so there is no
+separate password. Reach it at `http://<device-tailscale-ip>:8088` (or via
+MagicDNS, `http://<hostname>:8088`). Do not rebind it to `0.0.0.0` without adding
+authentication, as that would expose it to the LAN.
+
 ## Repository layout
 
 | File | Purpose |
@@ -36,6 +61,11 @@ happens automatically.)
 | `tailscale-gateway.service`      | systemd unit; starts after `network-online.target`, retries on failure. |
 | `tailscale-gateway-watch.sh`     | Watches for network changes and restarts the gateway when the subnet changes (hot-swap between LANs). |
 | `tailscale-gateway-watch.service`| systemd unit running the watcher. |
+| `tailscale-gateway-autonet.sh`   | DHCP fallback: sniffs a DHCP-less network, infers subnet/gateway, picks a free IP (with conflict detection), and self-configures. |
+| `tailscale-gateway-autonet.service`| systemd unit running auto-network setup before the gateway. |
+| `dashboard/`                     | Flask app + Dockerfile for the tailnet-only status web UI. |
+| `start-tailscale-dashboard.sh`   | Builds (if needed) and runs the dashboard container. |
+| `tailscale-gateway-dashboard.service`| systemd unit running the dashboard. |
 | `99-ip-forward.conf`             | sysctl drop-in enabling IPv4/IPv6 forwarding. |
 | `install.sh`                     | Installs the service onto a running Pi (optionally with a key). |
 | `prepare-image.sh`               | Bakes a Pi into a reusable golden image (Docker + deps + service, no key). |

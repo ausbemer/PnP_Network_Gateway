@@ -39,10 +39,21 @@ advertised_subnet() {
 }
 
 # ── Restart the gateway if (and only if) the subnet changed ───────────────────
+AUTONET="/usr/local/bin/tailscale-gateway-autonet.sh"
+
 reconcile() {
     local detected current
     if ! detected=$(detect_subnet); then
-        echo "watch: no usable default route yet — skipping"
+        # No default route. We may have just been plugged into a network with no
+        # DHCP — try the auto-static fallback (short DHCP wait since this is a
+        # live hot-swap, not a cold boot). If it establishes a route, the address
+        # it adds will fire another event and we'll reconcile again.
+        if [[ -x "${AUTONET}" ]]; then
+            echo "watch: no default route — attempting auto-network configuration"
+            DHCP_WAIT=5 "${AUTONET}" || true
+        else
+            echo "watch: no usable default route yet — skipping"
+        fi
         return 0
     fi
     current=$(advertised_subnet)

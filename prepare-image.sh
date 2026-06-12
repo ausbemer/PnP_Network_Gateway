@@ -34,6 +34,17 @@ fi
 
 echo "==> Preparing this Pi to become a reusable gateway image..."
 
+# ── 0. Network auto-config tooling ────────────────────────────────────────────
+# Used by tailscale-gateway-autonet.sh to sniff and configure DHCP-less networks.
+#   tcpdump  - passive capture        arping (iputils) - RFC 5227 ACD probes
+#   arp-scan - active host discovery   lldpd  - LLDP/CDP neighbor info
+#   ndisc6   - IPv6 router discovery (rdisc6)
+echo "--> Installing network auto-config tools..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y tcpdump arp-scan lldpd ndisc6 iputils-arping
+systemctl enable lldpd 2>/dev/null || true
+
 # ── 1. Install Docker (idempotent) ────────────────────────────────────────────
 if ! command -v docker &>/dev/null; then
     echo "--> Installing Docker via get.docker.com..."
@@ -59,6 +70,10 @@ docker pull tailscale/tailscale:latest
 # install.sh enables the service but, with no key present, does NOT start it.
 echo "--> Running install.sh (no auth key)..."
 bash "${SCRIPT_DIR}/install.sh"
+
+# ── 3b. Pre-build the dashboard image so first boot needs no build/internet ────
+echo "--> Building dashboard image (baked into the image)..."
+docker build -t tailscale-gateway-dashboard:local /opt/tailscale-gateway-dashboard
 
 # ── 4. Install the first-boot auth-key prompt ─────────────────────────────────
 echo "--> Installing first-login auth-key prompt to /etc/profile.d/..."

@@ -52,12 +52,30 @@ install -m 755 "${SCRIPT_DIR}/start-tailscale-gateway.sh" /usr/local/bin/start-t
 echo "--> Copying tailscale-gateway-watch.sh to /usr/local/bin/"
 install -m 755 "${SCRIPT_DIR}/tailscale-gateway-watch.sh" /usr/local/bin/tailscale-gateway-watch.sh
 
+echo "--> Copying tailscale-gateway-autonet.sh to /usr/local/bin/"
+install -m 755 "${SCRIPT_DIR}/tailscale-gateway-autonet.sh" /usr/local/bin/tailscale-gateway-autonet.sh
+
+echo "--> Copying start-tailscale-dashboard.sh to /usr/local/bin/"
+install -m 755 "${SCRIPT_DIR}/start-tailscale-dashboard.sh" /usr/local/bin/start-tailscale-dashboard.sh
+
+echo "--> Installing dashboard app to /opt/tailscale-gateway-dashboard/"
+install -d -m 755 /opt/tailscale-gateway-dashboard
+install -m 644 "${SCRIPT_DIR}/dashboard/app.py"          /opt/tailscale-gateway-dashboard/app.py
+install -m 644 "${SCRIPT_DIR}/dashboard/requirements.txt" /opt/tailscale-gateway-dashboard/requirements.txt
+install -m 644 "${SCRIPT_DIR}/dashboard/Dockerfile"      /opt/tailscale-gateway-dashboard/Dockerfile
+
 # ── 2. Systemd units ──────────────────────────────────────────────────────────
 echo "--> Installing systemd unit tailscale-gateway.service"
 install -m 644 "${SCRIPT_DIR}/tailscale-gateway.service" /etc/systemd/system/tailscale-gateway.service
 
 echo "--> Installing systemd unit tailscale-gateway-watch.service"
 install -m 644 "${SCRIPT_DIR}/tailscale-gateway-watch.service" /etc/systemd/system/tailscale-gateway-watch.service
+
+echo "--> Installing systemd unit tailscale-gateway-autonet.service"
+install -m 644 "${SCRIPT_DIR}/tailscale-gateway-autonet.service" /etc/systemd/system/tailscale-gateway-autonet.service
+
+echo "--> Installing systemd unit tailscale-gateway-dashboard.service"
+install -m 644 "${SCRIPT_DIR}/tailscale-gateway-dashboard.service" /etc/systemd/system/tailscale-gateway-dashboard.service
 
 # ── 3. IP forwarding ─────────────────────────────────────────────────────────
 echo "--> Enabling IP forwarding"
@@ -84,20 +102,25 @@ else
 fi
 
 # ── 5. Enable and start the services ─────────────────────────────────────────
-echo "--> Enabling tailscale-gateway.service and tailscale-gateway-watch.service"
+echo "--> Enabling tailscale-gateway services"
 systemctl daemon-reload
+systemctl enable tailscale-gateway-autonet.service
 systemctl enable tailscale-gateway.service
 systemctl enable tailscale-gateway-watch.service
+systemctl enable tailscale-gateway-dashboard.service
 
 if [[ -f /etc/tailscale-gateway/authkey ]]; then
     echo "--> Starting tailscale-gateway.service"
     systemctl start tailscale-gateway.service
     echo "--> Starting tailscale-gateway-watch.service"
     systemctl start tailscale-gateway-watch.service
+    echo "--> Starting tailscale-gateway-dashboard.service"
+    systemctl start tailscale-gateway-dashboard.service
     echo ""
     echo "==> Done. Check status with:"
     echo "      systemctl status tailscale-gateway"
     echo "      systemctl status tailscale-gateway-watch"
+    echo "      systemctl status tailscale-gateway-dashboard"
     echo "      docker logs -f tailscale-gateway"
 else
     echo ""
