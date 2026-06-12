@@ -45,13 +45,19 @@ done
 
 echo "==> Installing Tailscale gateway..."
 
-# ── 1. Startup script ─────────────────────────────────────────────────────────
+# ── 1. Startup + watcher scripts ──────────────────────────────────────────────
 echo "--> Copying start-tailscale-gateway.sh to /usr/local/bin/"
 install -m 755 "${SCRIPT_DIR}/start-tailscale-gateway.sh" /usr/local/bin/start-tailscale-gateway.sh
 
-# ── 2. Systemd unit ───────────────────────────────────────────────────────────
+echo "--> Copying tailscale-gateway-watch.sh to /usr/local/bin/"
+install -m 755 "${SCRIPT_DIR}/tailscale-gateway-watch.sh" /usr/local/bin/tailscale-gateway-watch.sh
+
+# ── 2. Systemd units ──────────────────────────────────────────────────────────
 echo "--> Installing systemd unit tailscale-gateway.service"
 install -m 644 "${SCRIPT_DIR}/tailscale-gateway.service" /etc/systemd/system/tailscale-gateway.service
+
+echo "--> Installing systemd unit tailscale-gateway-watch.service"
+install -m 644 "${SCRIPT_DIR}/tailscale-gateway-watch.service" /etc/systemd/system/tailscale-gateway-watch.service
 
 # ── 3. IP forwarding ─────────────────────────────────────────────────────────
 echo "--> Enabling IP forwarding"
@@ -77,20 +83,25 @@ else
     fi
 fi
 
-# ── 5. Enable and start the service ──────────────────────────────────────────
-echo "--> Enabling tailscale-gateway.service"
+# ── 5. Enable and start the services ─────────────────────────────────────────
+echo "--> Enabling tailscale-gateway.service and tailscale-gateway-watch.service"
 systemctl daemon-reload
 systemctl enable tailscale-gateway.service
+systemctl enable tailscale-gateway-watch.service
 
 if [[ -f /etc/tailscale-gateway/authkey ]]; then
     echo "--> Starting tailscale-gateway.service"
     systemctl start tailscale-gateway.service
+    echo "--> Starting tailscale-gateway-watch.service"
+    systemctl start tailscale-gateway-watch.service
     echo ""
     echo "==> Done. Check status with:"
     echo "      systemctl status tailscale-gateway"
+    echo "      systemctl status tailscale-gateway-watch"
     echo "      docker logs -f tailscale-gateway"
 else
     echo ""
-    echo "==> Service enabled but NOT started (no auth key yet)."
-    echo "    Add your key, then run: sudo systemctl start tailscale-gateway"
+    echo "==> Services enabled but NOT started (no auth key yet)."
+    echo "    Add your key, then run:"
+    echo "      sudo systemctl start tailscale-gateway tailscale-gateway-watch"
 fi

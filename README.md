@@ -22,12 +22,20 @@ runs `start-tailscale-gateway.sh`, which:
 
 IP forwarding (required for subnet routing) is enabled via a sysctl drop-in.
 
+A companion watcher service (`tailscale-gateway-watch`) monitors the kernel for
+network changes. If you move the Pi to a different LAN, it detects the new
+subnet and restarts the gateway to advertise it — no power cycle required. (Each
+new subnet still needs route approval; use `autoApprovers` in your ACL so this
+happens automatically.)
+
 ## Repository layout
 
 | File | Purpose |
 |------|---------|
-| `start-tailscale-gateway.sh`     | Core startup script — detects subnet, runs the container. |
+| `start-tailscale-gateway.sh`     | Core startup script — detects subnet, runs the container, sets up SNAT. |
 | `tailscale-gateway.service`      | systemd unit; starts after `network-online.target`, retries on failure. |
+| `tailscale-gateway-watch.sh`     | Watches for network changes and restarts the gateway when the subnet changes (hot-swap between LANs). |
+| `tailscale-gateway-watch.service`| systemd unit running the watcher. |
 | `99-ip-forward.conf`             | sysctl drop-in enabling IPv4/IPv6 forwarding. |
 | `install.sh`                     | Installs the service onto a running Pi (optionally with a key). |
 | `prepare-image.sh`               | Bakes a Pi into a reusable golden image (Docker + deps + service, no key). |

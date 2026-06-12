@@ -1,0 +1,18 @@
+[Unit]
+Description=Tailscale Gateway network-change watcher (hot-swap between LANs)
+# Start after the gateway itself so the first reconcile sees the running
+# container and doesn't trigger a redundant restart at boot.
+After=tailscale-gateway.service docker.service
+Wants=tailscale-gateway.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tailscale-gateway-watch.sh
+
+# The watcher is a long-running monitor; if it ever exits, bring it back.
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
