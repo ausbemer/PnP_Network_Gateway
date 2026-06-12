@@ -78,7 +78,6 @@ docker run -d \
     -e TS_ROUTES="${SUBNET}" \
     -e TS_USERSPACE=false \
     -e TS_STATE_DIR=/var/lib/tailscale \
-    -e TS_EXTRA_ARGS="--advertise-routes=${SUBNET}" \
     tailscale/tailscale:latest
 
 echo "Tailscale gateway started (container: ${CONTAINER_NAME})."
