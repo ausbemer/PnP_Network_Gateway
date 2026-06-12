@@ -1,0 +1,25 @@
+[Unit]
+Description=Tailscale Gateway Container
+# Only start once the network stack is fully up and DHCP has assigned an address.
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# The script detects the local subnet and launches the container.
+ExecStart=/usr/local/bin/start-tailscale-gateway.sh
+
+# Graceful stop: let Tailscale deregister before the container is removed.
+ExecStop=/bin/bash -c 'docker exec tailscale-gateway tailscale logout 2>/dev/null; docker stop tailscale-gateway'
+
+# If the script fails (e.g. no DHCP yet), retry up to 3 times with a 10s gap.
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target
