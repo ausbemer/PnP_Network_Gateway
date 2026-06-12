@@ -1,0 +1,19 @@
+[Unit]
+Description=Tailscale Gateway auto-network (DHCP fallback / no-DHCP autoconfig)
+# Run after the network stack is managing interfaces, but BEFORE the gateway
+# and before the system declares the network "online" — this unit is what
+# establishes connectivity on a DHCP-less segment.
+After=NetworkManager.service systemd-networkd.service
+Wants=network.target
+Before=network-online.target tailscale-gateway.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/tailscale-gateway-autonet.sh
+
+# Bounded: 15s DHCP wait + ~20s sniff + a few ACD probes. Cap it generously.
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

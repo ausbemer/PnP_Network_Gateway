@@ -1,0 +1,22 @@
+[Unit]
+Description=Tailscale Gateway status dashboard (tailnet-only web UI)
+# Needs Docker, and the gateway up so the tailscale0 interface exists to bind to.
+After=docker.service tailscale-gateway.service
+Wants=tailscale-gateway.service
+Requires=docker.service
+StartLimitIntervalSec=120s
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/start-tailscale-dashboard.sh
+ExecStop=/bin/bash -c 'docker stop tailscale-gateway-dashboard 2>/dev/null || true'
+
+# First run may build the image, which can take a few minutes.
+TimeoutStartSec=600
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
