@@ -1,8 +1,10 @@
 [Unit]
 Description=Tailscale Gateway Container
-# Only start once the network stack is fully up and DHCP has assigned an address.
-After=network-online.target docker.service
-Wants=network-online.target
+# Only start once the network stack is fully up and an address is assigned.
+# tailscale-gateway-autonet.service guarantees a default route exists first
+# (via DHCP, or via auto-static fallback on a DHCP-less network).
+After=network-online.target docker.service tailscale-gateway-autonet.service
+Wants=network-online.target tailscale-gateway-autonet.service
 Requires=docker.service
 
 [Service]
