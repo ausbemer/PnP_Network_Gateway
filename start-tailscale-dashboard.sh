@@ -17,12 +17,11 @@ TS_IFACE="${TS_IFACE:-tailscale0}"
 BOOT_DIR="/boot/firmware"
 [[ -d "${BOOT_DIR}" ]] || BOOT_DIR="/boot"
 
-# ── Build the image if it isn't already present (baked in at image-prep time, ──
-# ── or built on first run for an ad-hoc install). ─────────────────────────────
-if ! docker image inspect "${IMAGE}" &>/dev/null; then
-    echo "Building dashboard image from ${SRC_DIR}..."
-    docker build -t "${IMAGE}" "${SRC_DIR}"
-fi
+# ── Build the image every start (Docker layer cache makes this a near-instant ──
+# ── no-op when nothing changed, but it ensures app.py updates are picked up   ──
+# ── after a `git pull` + reinstall). ──────────────────────────────────────────
+echo "Building dashboard image from ${SRC_DIR} (cached if unchanged)..."
+docker build -t "${IMAGE}" "${SRC_DIR}"
 
 # ── Replace any stale container (idempotent restart) ──────────────────────────
 if docker inspect "${CONTAINER}" &>/dev/null; then
