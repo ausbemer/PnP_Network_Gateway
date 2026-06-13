@@ -37,7 +37,8 @@ RFC 5227 Address Conflict Detection, configures it tentatively, verifies it can
 actually reach the internet, and only then commits (via NetworkManager when
 present). This is heuristic — a completely silent segment can't be inferred, and
 the netmask defaults to /24 unless a directed broadcast or LLDP indicates
-otherwise.
+otherwise. To preview what it would do without changing anything, run
+`sudo tailscale-gateway-autonet.sh --dry-run`.
 
 ### Status dashboard
 

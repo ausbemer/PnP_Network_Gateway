@@ -31,7 +31,31 @@ SNIFF_SECS="${SNIFF_SECS:-20}"    # passive capture window
 ACD_TRIES="${ACD_TRIES:-20}"      # max candidate addresses to conflict-check
 PING_TARGETS=(1.1.1.1 9.9.9.9 8.8.8.8)
 
-LOG() { echo "autonet: $*"; }
+# --dry-run: sniff, infer, and report what WOULD be configured, changing nothing.
+DRY_RUN=0
+for arg in "$@"; do
+    case "${arg}" in
+        -n|--dry-run) DRY_RUN=1 ;;
+        -h|--help)
+            cat <<EOF
+Usage: $(basename "$0") [--dry-run]
+
+  Configures the network on a DHCP-less segment by sniffing and inferring it.
+
+  -n, --dry-run   Sniff and report the inferred subnet/gateway and the address
+                  that would be claimed, WITHOUT applying any configuration.
+                  (Still sends ARP conflict-detection probes; no addresses or
+                  routes are set, and internet reachability is not tested.)
+  -h, --help      Show this help.
+EOF
+            exit 0 ;;
+        *) echo "Unknown argument: ${arg}" >&2; exit 2 ;;
+    esac
+done
+
+LOG() {
+    if [[ ${DRY_RUN} -eq 1 ]]; then echo "autonet[dry-run]: $*"; else echo "autonet: $*"; fi
+}
 
 # ── Integer <-> dotted-quad helpers ───────────────────────────────────────────
 ip2int() { local a b c d; IFS=. read -r a b c d <<<"$1"; echo $(((a<<24)+(b<<16)+(c<<8)+d)); }
@@ -240,6 +264,13 @@ main() {
     local cand
     cand=$(pick_free_ip "${iface}" "${net}" "${prefix}" "${gw}" "${hosts}") \
         || { LOG "could not find a free address"; exit 1; }
+
+    if [[ ${DRY_RUN} -eq 1 ]]; then
+        LOG "WOULD configure ${cand}/${prefix} via ${gw} on ${iface}"
+        LOG "observed on-segment hosts: ${hosts:-none}"
+        LOG "dry run complete — no addresses, routes, or DNS changed"
+        exit 0
+    fi
 
     if try_config "${iface}" "${cand}" "${prefix}" "${gw}"; then
         commit "${iface}" "${cand}" "${prefix}" "${gw}"
