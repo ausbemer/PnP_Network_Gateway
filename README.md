@@ -54,6 +54,11 @@ separate password. Reach it at `http://<device-tailscale-ip>:8088` (or via
 MagicDNS, `http://<hostname>:8088`). Do not rebind it to `0.0.0.0` without adding
 authentication, as that would expose it to the LAN.
 
+The dashboard also shows the **autonet log** (the `autonet log →` link), reading
+`autonet.log` from the boot partition. `autonet` writes that file on every run,
+so you can diagnose a no-DHCP boot either over the tailnet (success) or by
+pulling the SD card and reading the FAT partition directly (failure).
+
 ## Repository layout
 
 | File | Purpose |

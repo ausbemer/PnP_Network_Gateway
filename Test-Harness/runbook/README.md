@@ -37,12 +37,22 @@ docker compose up -d --build
 docker compose logs -f      # confirm "sim[host-*]" chatter
 ```
 
-### Watching the Pi
+### Watching the Pi (no serial cable needed)
+
+`autonet` writes a copy of every run to **`autonet.log` on the boot (FAT)
+partition**, so you have two cable-free ways to read it:
+
+- **Success case** — once the Pi is on the tailnet, open the dashboard and click
+  **autonet log →** (or browse to `http://<pi-tailscale-ip>:8088/log`).
+- **Failure case** — power off, pull the SD card, put it in any computer, and
+  open `autonet.log` on the boot partition (the FAT volume that mounts
+  automatically on Windows/macOS).
+
+If you do have a console (serial header or HDMI), the same output is live there
+and in the journal:
 ```bash
-# over serial console:
-journalctl -u tailscale-gateway-autonet -f
-# also useful:
-journalctl -u tailscale-gateway -f
+journalctl -u tailscale-gateway-autonet -b
+journalctl -u tailscale-gateway -b
 ip addr ; ip route
 ```
 

@@ -57,6 +57,32 @@ LOG() {
     if [[ ${DRY_RUN} -eq 1 ]]; then echo "autonet[dry-run]: $*"; else echo "autonet: $*"; fi
 }
 
+# ── Persist a copy of this run's output to the boot (FAT) partition ────────────
+# Lets you pull the SD card and read autonet.log on any computer after a failed
+# run, and is mounted into the dashboard for reading over the tailnet on success.
+# Output still flows to stdout (journald) as well.
+setup_logging() {
+    local d
+    AUTONET_LOG=""
+    for d in /boot/firmware /boot /var/log; do
+        if [[ -d "${d}" && -w "${d}" ]]; then AUTONET_LOG="${d}/autonet.log"; break; fi
+    done
+    [[ -z "${AUTONET_LOG}" ]] && return 0   # nowhere writable; stick to stdout
+
+    # Bound the file size. The dashboard mounts the directory (not the file),
+    # so replacing the inode here is safe.
+    if [[ -f "${AUTONET_LOG}" ]] \
+       && (( $(wc -l < "${AUTONET_LOG}" 2>/dev/null || echo 0) > 2000 )); then
+        tail -n 1000 "${AUTONET_LOG}" > "${AUTONET_LOG}.tmp" 2>/dev/null \
+            && mv "${AUTONET_LOG}.tmp" "${AUTONET_LOG}"
+    fi
+
+    echo "===== autonet run $(date -Is 2>/dev/null) (dry_run=${DRY_RUN}) =====" \
+        >> "${AUTONET_LOG}" 2>/dev/null || true
+    # Mirror everything from here on to the log file, keeping stdout intact.
+    exec > >(tee -a "${AUTONET_LOG}") 2>&1
+}
+
 # ── Integer <-> dotted-quad helpers ───────────────────────────────────────────
 ip2int() { local a b c d; IFS=. read -r a b c d <<<"$1"; echo $(((a<<24)+(b<<16)+(c<<8)+d)); }
 int2ip() { local i=$1; echo "$(((i>>24)&255)).$(((i>>16)&255)).$(((i>>8)&255)).$((i&255))"; }
@@ -228,6 +254,7 @@ commit() {
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
+    setup_logging
     if have_l3; then LOG "default route already present — nothing to do"; exit 0; fi
 
     LOG "waiting up to ${DHCP_WAIT}s for DHCP..."

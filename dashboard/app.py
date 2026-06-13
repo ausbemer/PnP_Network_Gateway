@@ -26,6 +26,7 @@ app = Flask(__name__)
 PORT = int(os.environ.get("DASHBOARD_PORT", "8088"))
 TS_IFACE = os.environ.get("TS_IFACE", "tailscale0")
 SCAN_TIMEOUT = int(os.environ.get("SCAN_TIMEOUT", "15"))
+AUTONET_LOG = os.environ.get("AUTONET_LOG", "/bootfw/autonet.log")
 
 
 def run(cmd, timeout=10):
@@ -161,7 +162,10 @@ PAGE = """<!doctype html>
 <body>
 <header>
   <h1>{{ info.hostname }}</h1>
-  <div class="ts">{{ info.tailscale_ip or "tailscale: offline" }}</div>
+  <div>
+    <a class="refresh" href="/log" style="margin-right:16px">autonet log →</a>
+    <span class="ts">{{ info.tailscale_ip or "tailscale: offline" }}</span>
+  </div>
 </header>
 <main>
   <div class="cards">
@@ -214,6 +218,46 @@ def index():
     scanned_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return render_template_string(PAGE, info=info, devices=devices,
                                   scanned_at=scanned_at)
+
+
+LOG_PAGE = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>autonet log</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: #0f1419; color: #e6edf3; }
+  header { padding: 20px 24px; border-bottom: 1px solid #222b34;
+           display: flex; justify-content: space-between; align-items: baseline; }
+  header h1 { font-size: 1.1rem; margin: 0; }
+  a { color: #58a6ff; text-decoration: none; }
+  main { padding: 24px; max-width: 980px; margin: 0 auto; }
+  pre { background: #161b22; border: 1px solid #222b34; border-radius: 10px;
+        padding: 16px; overflow-x: auto; font-family: ui-monospace, monospace;
+        font-size: .82rem; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+  .path { color: #8b949e; font-size: .8rem; margin-bottom: 10px; }
+</style></head>
+<body>
+<header><h1>autonet log</h1><a href="/">← back to status</a></header>
+<main>
+  <div class="path">{{ path }}</div>
+  <pre>{{ log }}</pre>
+</main></body></html>"""
+
+
+@app.route("/log")
+def autonet_log():
+    try:
+        with open(AUTONET_LOG, "r", errors="replace") as f:
+            lines = f.read().splitlines()
+        log = "\n".join(lines[-800:]) or "(log file is empty)"
+    except FileNotFoundError:
+        log = ("(no autonet log yet — autonet runs only when there is no DHCP "
+               "lease, or it hasn't run on this boot)")
+    except Exception as e:
+        log = f"(could not read {AUTONET_LOG}: {e})"
+    return render_template_string(LOG_PAGE, log=log, path=AUTONET_LOG)
 
 
 @app.route("/healthz")

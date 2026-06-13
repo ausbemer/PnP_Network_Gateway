@@ -12,6 +12,11 @@ SRC_DIR="/opt/tailscale-gateway-dashboard"
 PORT="${DASHBOARD_PORT:-8088}"
 TS_IFACE="${TS_IFACE:-tailscale0}"
 
+# Boot (FAT) partition holds autonet.log; mount it read-only so the dashboard
+# can display it. Path differs across Pi OS versions.
+BOOT_DIR="/boot/firmware"
+[[ -d "${BOOT_DIR}" ]] || BOOT_DIR="/boot"
+
 # ── Build the image if it isn't already present (baked in at image-prep time, ──
 # ── or built on first run for an ad-hoc install). ─────────────────────────────
 if ! docker image inspect "${IMAGE}" &>/dev/null; then
@@ -33,6 +38,8 @@ docker run -d \
     --cap-add NET_ADMIN \
     -e DASHBOARD_PORT="${PORT}" \
     -e TS_IFACE="${TS_IFACE}" \
+    -e AUTONET_LOG="/bootfw/autonet.log" \
+    -v "${BOOT_DIR}:/bootfw:ro" \
     "${IMAGE}"
 
 echo "Dashboard started. Once Tailscale is up, browse to:"
