@@ -10,6 +10,20 @@ set -u
 : "${GATEWAY:=192.168.77.1}"
 : "${BROADCAST:=192.168.77.255}"
 : "${PEERS:=}"
+: "${STATIC_IP:=}"   # e.g. 192.168.77.61/24 — set when there's no DHCP (BR2 test VLAN)
+
+# When STATIC_IP is provided (no-DHCP segment, e.g. running on the BR2), assign
+# it ourselves. Requires the container to have NET_ADMIN (--cap-add NET_ADMIN).
+# When empty (e.g. the macvlan compose setup), we keep whatever IP we were given.
+if [ -n "${STATIC_IP}" ]; then
+    echo "sim[${SELF_NAME}]: setting static ${STATIC_IP} on eth0 (gw ${GATEWAY})"
+    ip addr flush dev eth0 2>/dev/null || true
+    if ! ip addr add "${STATIC_IP}" dev eth0 2>/dev/null; then
+        echo "sim[${SELF_NAME}]: WARN could not set address — is --cap-add NET_ADMIN missing?"
+    fi
+    ip link set eth0 up 2>/dev/null || true
+    ip route replace default via "${GATEWAY}" 2>/dev/null || true
+fi
 
 self_ip="$(ip -4 -o addr show eth0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)"
 echo "sim[${SELF_NAME}]: ip=${self_ip:-?} gw=${GATEWAY} bcast=${BROADCAST} peers=[${PEERS}]"
