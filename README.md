@@ -37,7 +37,8 @@ RFC 5227 Address Conflict Detection, configures it tentatively, verifies it can
 actually reach the internet, and only then commits (via NetworkManager when
 present). This is heuristic — a completely silent segment can't be inferred, and
 the netmask defaults to /24 unless a directed broadcast or LLDP indicates
-otherwise.
+otherwise. To preview what it would do without changing anything, run
+`sudo tailscale-gateway-autonet.sh --dry-run`.
 
 ### Status dashboard
 
@@ -52,6 +53,11 @@ members of your tailnet — that membership is the access control, so there is n
 separate password. Reach it at `http://<device-tailscale-ip>:8088` (or via
 MagicDNS, `http://<hostname>:8088`). Do not rebind it to `0.0.0.0` without adding
 authentication, as that would expose it to the LAN.
+
+The dashboard also shows the **autonet log** (the `autonet log →` link), reading
+`autonet.log` from the boot partition. `autonet` writes that file on every run,
+so you can diagnose a no-DHCP boot either over the tailnet (success) or by
+pulling the SD card and reading the FAT partition directly (failure).
 
 ## Repository layout
 

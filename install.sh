@@ -110,12 +110,18 @@ systemctl enable tailscale-gateway-watch.service
 systemctl enable tailscale-gateway-dashboard.service
 
 if [[ -f /etc/tailscale-gateway/authkey ]]; then
-    echo "--> Starting tailscale-gateway.service"
-    systemctl start tailscale-gateway.service
-    echo "--> Starting tailscale-gateway-watch.service"
-    systemctl start tailscale-gateway-watch.service
-    echo "--> Starting tailscale-gateway-dashboard.service"
-    systemctl start tailscale-gateway-dashboard.service
+    # Use restart (not start) so re-running install.sh after a `git pull`
+    # actually redeploys: oneshot units that are already "active" ignore start,
+    # and the dashboard/gateway start scripts recreate their containers (and the
+    # dashboard rebuilds its image) on restart.
+    echo "--> (Re)starting tailscale-gateway-autonet.service"
+    systemctl restart tailscale-gateway-autonet.service || true
+    echo "--> (Re)starting tailscale-gateway.service"
+    systemctl restart tailscale-gateway.service
+    echo "--> (Re)starting tailscale-gateway-watch.service"
+    systemctl restart tailscale-gateway-watch.service
+    echo "--> (Re)starting tailscale-gateway-dashboard.service"
+    systemctl restart tailscale-gateway-dashboard.service
     echo ""
     echo "==> Done. Check status with:"
     echo "      systemctl status tailscale-gateway"

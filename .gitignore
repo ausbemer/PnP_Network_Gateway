@@ -3,6 +3,8 @@ authkey
 *authkey*
 *.key
 tskey-*
+*-key.txt
+Temp-key.txt
 
 # ── Disk images & captures (large, may contain node state) ────────────────────
 *.img

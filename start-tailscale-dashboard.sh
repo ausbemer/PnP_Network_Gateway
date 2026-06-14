@@ -12,12 +12,16 @@ SRC_DIR="/opt/tailscale-gateway-dashboard"
 PORT="${DASHBOARD_PORT:-8088}"
 TS_IFACE="${TS_IFACE:-tailscale0}"
 
-# ── Build the image if it isn't already present (baked in at image-prep time, ──
-# ── or built on first run for an ad-hoc install). ─────────────────────────────
-if ! docker image inspect "${IMAGE}" &>/dev/null; then
-    echo "Building dashboard image from ${SRC_DIR}..."
-    docker build -t "${IMAGE}" "${SRC_DIR}"
-fi
+# Boot (FAT) partition holds autonet.log; mount it read-only so the dashboard
+# can display it. Path differs across Pi OS versions.
+BOOT_DIR="/boot/firmware"
+[[ -d "${BOOT_DIR}" ]] || BOOT_DIR="/boot"
+
+# ── Build the image every start (Docker layer cache makes this a near-instant ──
+# ── no-op when nothing changed, but it ensures app.py updates are picked up   ──
+# ── after a `git pull` + reinstall). ──────────────────────────────────────────
+echo "Building dashboard image from ${SRC_DIR} (cached if unchanged)..."
+docker build -t "${IMAGE}" "${SRC_DIR}"
 
 # ── Replace any stale container (idempotent restart) ──────────────────────────
 if docker inspect "${CONTAINER}" &>/dev/null; then
@@ -33,6 +37,8 @@ docker run -d \
     --cap-add NET_ADMIN \
     -e DASHBOARD_PORT="${PORT}" \
     -e TS_IFACE="${TS_IFACE}" \
+    -e AUTONET_LOG="/bootfw/autonet.log" \
+    -v "${BOOT_DIR}:/bootfw:ro" \
     "${IMAGE}"
 
 echo "Dashboard started. Once Tailscale is up, browse to:"
