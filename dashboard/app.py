@@ -17,9 +17,18 @@ import os
 import re
 import socket
 import subprocess
+import threading
 import time
 
-from flask import Flask, render_template_string
+from flask import Flask, redirect, render_template_string, request
+
+# scapy is only needed for the (optional) device-blocking feature. Import it
+# defensively so the dashboard still runs if it isn't installed.
+try:
+    from scapy.all import ARP, Ether, get_if_hwaddr, sendp, srp
+    SCAPY_OK = True
+except Exception:
+    SCAPY_OK = False
 
 app = Flask(__name__)
 
@@ -27,6 +36,19 @@ PORT = int(os.environ.get("DASHBOARD_PORT", "8088"))
 TS_IFACE = os.environ.get("TS_IFACE", "tailscale0")
 SCAN_TIMEOUT = int(os.environ.get("SCAN_TIMEOUT", "15"))
 AUTONET_LOG = os.environ.get("AUTONET_LOG", "/bootfw/autonet.log")
+
+# A MAC that (almost certainly) belongs to no one on the segment. Poisoned
+# victims send their gateway traffic here, where it goes nowhere — a true
+# blackhole. We deliberately do NOT use our own MAC, because this host has IP
+# forwarding enabled for Tailscale and would otherwise route the victim's
+# traffic for it (defeating the block).
+BLACKHOLE_MAC = "02:00:00:00:00:01"
+
+# Active blocks: target_ip -> {"stop": Event, "thread": Thread, "mac": str}.
+# Intentionally in-memory only: blocks are manual and ephemeral, and clear on
+# restart. No persistence, nothing auto-arms.
+_blocks = {}
+_blocks_lock = threading.Lock()
 
 
 def run(cmd, timeout=10):
@@ -116,6 +138,113 @@ def scan_devices(iface, gateway, self_ip):
     return sorted(devices.values(), key=lambda d: tuple(int(o) for o in d["ip"].split(".")))
 
 
+# ── Device blocking (ARP blackhole) ───────────────────────────────────────────
+def iface_mac(iface):
+    try:
+        with open(f"/sys/class/net/{iface}/address") as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+
+def resolve_mac(ip, iface):
+    """ARP-resolve an IP to a MAC on the given interface (scapy)."""
+    if not (SCAPY_OK and ip and iface):
+        return None
+    try:
+        ans, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=ip),
+                     timeout=2, iface=iface, verbose=0)
+        for _, r in ans:
+            return r.hwsrc
+    except Exception:
+        pass
+    return None
+
+
+def has_ipv6_neighbor(mac):
+    """True if this MAC has an IPv6 neighbor entry — a hint the block may not
+    fully cut the device, since ARP poisoning only affects IPv4."""
+    if not mac:
+        return False
+    return mac.lower() in run(["ip", "-6", "neigh"]).lower()
+
+
+def _poison_loop(target_ip, target_mac, gw_ip, gw_mac, iface, stop):
+    # Tell the victim the gateway is at the blackhole MAC, and tell the gateway
+    # the victim is at the blackhole MAC. Resend until stopped to hold caches.
+    to_target = Ether(dst=target_mac) / ARP(
+        op=2, psrc=gw_ip, hwsrc=BLACKHOLE_MAC, pdst=target_ip, hwdst=target_mac)
+    to_gateway = None
+    if gw_mac:
+        to_gateway = Ether(dst=gw_mac) / ARP(
+            op=2, psrc=target_ip, hwsrc=BLACKHOLE_MAC, pdst=gw_ip, hwdst=gw_mac)
+    while not stop.is_set():
+        try:
+            sendp(to_target, iface=iface, verbose=0)
+            if to_gateway is not None:
+                sendp(to_gateway, iface=iface, verbose=0)
+        except Exception:
+            pass
+        stop.wait(2)
+
+
+def _heal(target_ip, target_mac, gw_ip, gw_mac, iface):
+    # Re-assert the correct mappings a few times so the device recovers quickly.
+    if not (SCAPY_OK and gw_mac):
+        return
+    pkts = [
+        Ether(dst=target_mac) / ARP(op=2, psrc=gw_ip, hwsrc=gw_mac,
+                                    pdst=target_ip, hwdst=target_mac),
+        Ether(dst=gw_mac) / ARP(op=2, psrc=target_ip, hwsrc=target_mac,
+                                pdst=gw_ip, hwdst=gw_mac),
+    ]
+    for _ in range(5):
+        for p in pkts:
+            try:
+                sendp(p, iface=iface, verbose=0)
+            except Exception:
+                pass
+        time.sleep(0.3)
+
+
+def start_block(target_ip, target_mac, gw_ip, iface):
+    if not SCAPY_OK:
+        return False, "packet engine (scapy) not available in this image"
+    if not (target_ip and target_mac and iface):
+        return False, "missing target/interface info"
+    with _blocks_lock:
+        if target_ip in _blocks:
+            return True, "already blocked"
+    gw_mac = resolve_mac(gw_ip, iface) if gw_ip else None
+    stop = threading.Event()
+    t = threading.Thread(
+        target=_poison_loop,
+        args=(target_ip, target_mac, gw_ip, gw_mac, iface, stop),
+        daemon=True,
+    )
+    with _blocks_lock:
+        _blocks[target_ip] = {"stop": stop, "thread": t, "mac": target_mac,
+                              "gw_ip": gw_ip, "gw_mac": gw_mac, "iface": iface}
+    t.start()
+    return True, "blocking"
+
+
+def stop_block(target_ip):
+    with _blocks_lock:
+        info = _blocks.pop(target_ip, None)
+    if not info:
+        return False, "not blocked"
+    info["stop"].set()
+    _heal(target_ip, info["mac"], info.get("gw_ip"), info.get("gw_mac"),
+          info.get("iface"))
+    return True, "unblocked"
+
+
+def blocked_ips():
+    with _blocks_lock:
+        return set(_blocks.keys())
+
+
 PAGE = """<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -152,10 +281,20 @@ PAGE = """<!doctype html>
          margin-left: 6px; vertical-align: middle; }
   .tag.gw { background: #1f6feb33; color: #58a6ff; }
   .tag.self { background: #23863633; color: #3fb950; }
+  .tag.blk { background: #f8514933; color: #f85149; }
+  tr.blocked td { background: #2a1416; }
   .bar { display: flex; justify-content: space-between; align-items: center;
          margin-bottom: 12px; }
   .bar h2 { font-size: 1rem; margin: 0; }
   .refresh { color: #58a6ff; text-decoration: none; font-size: .9rem; }
+  .btn { font: inherit; font-size: .82rem; padding: 4px 12px; border-radius: 6px;
+         border: 1px solid transparent; cursor: pointer; }
+  .btn.block { background: #b62324; color: #fff; }
+  .btn.unblock { background: #21262d; color: #e6edf3; border-color: #3b434b; }
+  .warn { color: #d29922; font-size: .72rem; margin-left: 6px; cursor: help; }
+  .notice { background: #161b22; border: 1px solid #3b2a12; color: #d29922;
+            border-radius: 8px; padding: 8px 12px; font-size: .82rem;
+            margin-bottom: 14px; }
   footer { color: #56606a; font-size: .78rem; padding: 0 24px 28px;
            max-width: 980px; margin: 0 auto; }
 </style></head>
@@ -184,30 +323,53 @@ PAGE = """<!doctype html>
       <div class="value">{{ devices|length }}</div></div>
   </div>
 
+  {% if msg %}<div class="notice">{{ msg }}</div>{% endif %}
+  {% if not scapy_ok %}<div class="notice">Device blocking is unavailable —
+    the packet engine (scapy) isn't installed in this image.</div>{% endif %}
+
   <div class="bar">
-    <h2>Devices on {{ info.subnet or "subnet" }}</h2>
+    <h2>Devices on {{ info.subnet or "subnet" }}{% if blocked_count %}
+      · <span class="bad">{{ blocked_count }} blocked</span>{% endif %}</h2>
     <a class="refresh" href="/">↻ Rescan</a>
   </div>
   <table>
-    <thead><tr><th>IP address</th><th>MAC</th><th>Vendor</th></tr></thead>
+    <thead><tr><th>IP address</th><th>MAC</th><th>Vendor</th><th>Action</th></tr></thead>
     <tbody>
     {% for d in devices %}
-      <tr>
+      <tr class="{{ 'blocked' if d.blocked else '' }}">
         <td class="ip"><a href="http://{{ d.ip }}" target="_blank" rel="noopener">{{ d.ip }}</a>
           {% if d.is_gateway %}<span class="tag gw">gateway</span>{% endif %}
           {% if d.is_self %}<span class="tag self">this device</span>{% endif %}
+          {% if d.blocked %}<span class="tag blk">blocked</span>{% endif %}
         </td>
         <td class="mac">{{ d.mac }}</td>
         <td>{{ d.vendor }}</td>
+        <td>
+          {% if d.is_gateway or d.is_self %}—
+          {% elif d.blocked %}
+            <form method="post" action="/unblock" style="display:inline">
+              <input type="hidden" name="ip" value="{{ d.ip }}">
+              <button class="btn unblock">Unblock</button>
+            </form>
+          {% elif scapy_ok %}
+            <form method="post" action="/block" style="display:inline">
+              <input type="hidden" name="ip" value="{{ d.ip }}">
+              <input type="hidden" name="mac" value="{{ d.mac }}">
+              <button class="btn block">Block</button>
+            </form>
+            {% if d.ipv6 %}<span class="warn"
+              title="This device has an IPv6 address. ARP blocking only affects IPv4, so it may stay reachable over IPv6.">v6?</span>{% endif %}
+          {% else %}—{% endif %}
+        </td>
       </tr>
     {% else %}
-      <tr><td colspan="3">No devices found (scan returned nothing).</td></tr>
+      <tr><td colspan="4">No devices found (scan returned nothing).</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </main>
 <footer>Scanned {{ scanned_at }} · arp-scan on {{ info.lan_iface or "—" }} ·
-  served on the tailnet only</footer>
+  served on the tailnet only · blocks are manual and clear on restart</footer>
 </body></html>"""
 
 
@@ -215,9 +377,36 @@ PAGE = """<!doctype html>
 def index():
     info = net_info()
     devices = scan_devices(info["lan_iface"], info["gateway"], info["lan_ip"])
+    blocked = blocked_ips()
+    for d in devices:
+        d["blocked"] = d["ip"] in blocked
+        d["ipv6"] = has_ipv6_neighbor(d["mac"])
     scanned_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return render_template_string(PAGE, info=info, devices=devices,
-                                  scanned_at=scanned_at)
+    return render_template_string(
+        PAGE, info=info, devices=devices, scanned_at=scanned_at,
+        scapy_ok=SCAPY_OK, blocked_count=len(blocked),
+        msg=request.args.get("msg"))
+
+
+@app.route("/block", methods=["POST"])
+def block():
+    info = net_info()
+    ip = (request.form.get("ip") or "").strip()
+    mac = (request.form.get("mac") or "").strip()
+    # Guards: never blackhole the gateway or ourselves.
+    if ip and ip == info.get("gateway"):
+        return redirect("/?msg=Refused:+that's+the+gateway")
+    if ip and ip == info.get("lan_ip"):
+        return redirect("/?msg=Refused:+that's+this+device")
+    ok, why = start_block(ip, mac, info.get("gateway"), info.get("lan_iface"))
+    return redirect(f"/?msg={('Blocking ' + ip) if ok else ('Could not block: ' + why)}")
+
+
+@app.route("/unblock", methods=["POST"])
+def unblock():
+    ip = (request.form.get("ip") or "").strip()
+    ok, why = stop_block(ip)
+    return redirect(f"/?msg={('Unblocked ' + ip) if ok else ('Not blocked: ' + ip)}")
 
 
 LOG_PAGE = """<!doctype html>
