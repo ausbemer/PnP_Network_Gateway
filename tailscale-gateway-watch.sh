@@ -20,15 +20,18 @@ set -uo pipefail
 CONTAINER_NAME="tailscale-gateway"
 DEBOUNCE=5   # seconds of network quiet to wait for before reconciling
 
-# ── Detect the LAN subnet (same logic as start-tailscale-gateway.sh) ──────────
+# ── Detect the connected subnet(s) — MUST match what start-tailscale-gateway.sh
+# advertises (all connected subnets on the default-route interface, sorted and
+# comma-joined). Returning a single subnet here while the gateway advertises
+# several causes a permanent detected!=advertised mismatch and a restart loop. ──
 detect_subnet() {
-    local iface subnet
+    local iface subnets
     iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
     [[ -z "${iface}" ]] && return 1
-    subnet=$(ip route show dev "${iface}" proto kernel 2>/dev/null \
-        | awk '{print $1; exit}')
-    [[ -z "${subnet}" ]] && return 1
-    printf '%s' "${subnet}"
+    subnets=$(ip route show dev "${iface}" proto kernel 2>/dev/null \
+        | awk '{print $1}' | sort -u | paste -sd, -)
+    [[ -z "${subnets}" ]] && return 1
+    printf '%s' "${subnets}"
 }
 
 # ── What is the running container currently advertising? ───────────────────────
