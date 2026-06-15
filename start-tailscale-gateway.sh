@@ -22,9 +22,12 @@ if [[ -z "${IFACE}" ]]; then
     exit 1
 fi
 
-# The directly-connected (proto kernel) route on that interface is the subnet.
+# All directly-connected (proto kernel) subnets on that interface. The Pi may be
+# multi-homed across several subnets on one shared segment (e.g. an unmanaged
+# switch joining two networks) — advertise every one of them to the tailnet,
+# comma-separated, so all are reachable over Tailscale.
 SUBNET=$(ip route show dev "${IFACE}" proto kernel 2>/dev/null \
-    | awk '{print $1}' | head -1)
+    | awk '{print $1}' | sort -u | paste -sd, -)
 
 if [[ -z "${SUBNET}" ]]; then
     echo "ERROR: Could not determine subnet for interface ${IFACE}." >&2
@@ -32,7 +35,7 @@ if [[ -z "${SUBNET}" ]]; then
 fi
 
 echo "Interface : ${IFACE}"
-echo "Subnet    : ${SUBNET}"
+echo "Subnet(s) : ${SUBNET}"
 
 # ── 2. Resolve auth key ───────────────────────────────────────────────────────
 

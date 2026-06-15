@@ -187,6 +187,19 @@ infer_prefix() {
     echo 24
 }
 
+# ── Subnet discovery (for multi-homing on a shared segment) ───────────────────
+# Cluster every on-segment IP into its /24 and list the networks present, busiest
+# first. An unmanaged switch joining two subnets shows up here as two entries.
+detect_networks() {
+    local cap; cap=$(cat)
+    {
+        printf '%s\n' "${cap}" | grep -oE 'tell [0-9.]+'        | awk '{print $2}'
+        printf '%s\n' "${cap}" | grep -oE 'who-has [0-9.]+'     | awk '{print $2}'
+        printf '%s\n' "${cap}" | grep -oE 'Reply [0-9.]+ is-at' | awk '{print $2}'
+    } | awk -F. 'NF==4 {print $1"."$2"."$3".0/24"}' \
+      | sort | uniq -c | sort -rn | awk '{print $2}'
+}
+
 # ── Address Conflict Detection (RFC 5227) ─────────────────────────────────────
 # Returns 0 if the address is FREE (no ARP reply), 1 if in use.
 ip_is_free() {
@@ -218,11 +231,17 @@ pick_free_ip() {
     return 1
 }
 
-# ── Connectivity test ─────────────────────────────────────────────────────────
+# ── Connectivity test (TCP, not ICMP) ─────────────────────────────────────────
+# Many firewalls — industrial routers like the Siemens Scalance especially —
+# silently drop outbound ICMP while passing real traffic. So we verify with a
+# TCP connect, not ping, to avoid false "no internet" verdicts.
 test_internet() {
-    local t
-    for t in "${PING_TARGETS[@]}"; do
-        ping -c1 -W2 "${t}" >/dev/null 2>&1 && return 0
+    local hp h p
+    for hp in 1.1.1.1:443 8.8.8.8:443 9.9.9.9:443; do
+        h=${hp%:*}; p=${hp#*:}
+        if timeout 3 bash -c "exec 3<>/dev/tcp/${h}/${p}" 2>/dev/null; then
+            return 0
+        fi
     done
     return 1
 }
@@ -233,25 +252,27 @@ test_internet() {
 verify_via() {
     local iface=$1 gw=$2
     ip route replace default via "${gw}" dev "${iface}" 2>/dev/null || return 1
-    # Gateway must answer at L2/L3 first, then prove actual internet.
-    if ping -c1 -W1 "${gw}" >/dev/null 2>&1 && test_internet; then
-        return 0
-    fi
+    if test_internet; then return 0; fi
     ip route del default via "${gw}" dev "${iface}" 2>/dev/null || true
     return 1
 }
 
 # ── Persist via NetworkManager so it isn't stripped; fall back to raw ip ───────
+# Persists EVERY global IPv4 address currently on the interface (we may be
+# multi-homed across several subnets) plus the chosen default gateway.
 commit() {
-    local iface=$1 ip=$2 prefix=$3 gw=$4
+    local iface=$1 gw=$2
+    local addrs
+    addrs=$(ip -4 -o addr show dev "${iface}" scope global 2>/dev/null \
+        | awk '{print $4}' | paste -sd, -)
     if command -v nmcli >/dev/null 2>&1; then
         local con
         con=$(nmcli -t -g GENERAL.CONNECTION device show "${iface}" 2>/dev/null)
         if [[ -n "${con}" ]]; then
-            LOG "persisting static config on NM connection '${con}'"
+            LOG "persisting static config on NM connection '${con}': [${addrs}] via ${gw}"
             nmcli con mod "${con}" \
                 ipv4.method manual \
-                ipv4.addresses "${ip}/${prefix}" \
+                ipv4.addresses "${addrs}" \
                 ipv4.gateway "${gw}" \
                 ipv4.dns "${gw} 1.1.1.1" 2>/dev/null || true
             nmcli con up "${con}" 2>/dev/null || true
@@ -266,86 +287,108 @@ commit() {
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
     setup_logging
-    if have_l3; then LOG "default route already present — nothing to do"; exit 0; fi
 
-    LOG "waiting up to ${DHCP_WAIT}s for DHCP..."
-    if wait_for_dhcp; then LOG "DHCP succeeded"; exit 0; fi
+    # Establish which interface and whether we already have L3 (DHCP).
+    local had_l3=0 iface
+    if have_l3; then
+        had_l3=1
+    else
+        LOG "waiting up to ${DHCP_WAIT}s for DHCP..."
+        wait_for_dhcp && { had_l3=1; LOG "DHCP succeeded"; }
+    fi
+    if [[ ${had_l3} -eq 1 ]]; then
+        iface=$(ip -4 route show default 2>/dev/null | awk '/default/{print $5; exit}')
+    else
+        iface=$(primary_iface) || { LOG "no live interface found"; exit 1; }
+        LOG "no DHCP on ${iface}; entering auto-static mode"
+    fi
+    [[ -z "${iface}" ]] && { LOG "could not determine interface"; exit 1; }
 
-    local iface; iface=$(primary_iface) || { LOG "no live interface found"; exit 1; }
-    LOG "no DHCP on ${iface}; entering auto-static mode"
-
+    # Sniff the segment to discover the subnet(s) present. An unmanaged switch
+    # joining two networks shows up as two subnets here.
     local cap; cap=$(sniff "${iface}")
-    [[ -z "${cap}" ]] && { LOG "captured no traffic; cannot infer network"; exit 1; }
+    if [[ -z "${cap}" ]]; then
+        [[ ${had_l3} -eq 1 ]] && { LOG "online via DHCP; no extra segment traffic seen"; exit 0; }
+        LOG "captured no traffic; cannot infer network"; exit 1
+    fi
 
-    local ranked hosts bcast prefix anchor net
-    ranked=$(printf '%s\n' "${cap}" | infer_gateways)      # most-ARPed first
+    local hosts ranked nets have_nets
     hosts=$(printf '%s\n' "${cap}" | infer_hosts | tr '\n' ' ')
-    bcast=$(printf '%s\n' "${cap}" | infer_broadcast)
+    ranked=$(printf '%s\n' "${cap}" | infer_gateways)         # ARP'd IPs, busiest first
+    nets=$(printf '%s\n' "${cap}" | detect_networks)          # /24s, busiest first
+    [[ -z "${nets}" ]] && { LOG "no subnets observed; giving up"
+        [[ ${had_l3} -eq 1 ]] && exit 0 || exit 1; }
+    LOG "subnets on segment: $(printf '%s ' ${nets})"
 
-    # Anchor for subnet/prefix math: top gateway candidate, else any host.
-    anchor=$(printf '%s\n' ${ranked} | head -1)
-    [[ -z "${anchor}" ]] && anchor=$(printf '%s\n' ${hosts} | head -1)
-    [[ -z "${anchor}" ]] && { LOG "no host addresses observed; giving up"; exit 1; }
+    # Subnets we already hold an address in (e.g. from DHCP) — don't re-claim.
+    have_nets=$(ip -4 route show dev "${iface}" proto kernel 2>/dev/null | awk '{print $1}')
 
-    prefix=$(infer_prefix "${anchor}" "${bcast}")
-    local m neti bci gw1 gwlast
-    m=$(mask_int "${prefix}"); neti=$(( $(ip2int "${anchor}") & m ))
-    bci=$(( neti | (0xFFFFFFFF & ~m) ))
-    net=$(int2ip "${neti}")
-    gw1=$(int2ip $(( neti + 1 )))        # conventional .1
-    gwlast=$(int2ip $(( bci - 1 )))      # conventional last host (e.g. .254 on /24)
+    # Claim a free address in each subnet, and gather gateway candidates. We
+    # multi-home across every subnet so all are locally reachable (and can be
+    # advertised over Tailscale); only ONE becomes the default route.
+    local gw_candidates=() seen_gw=" " primary_net="" netcidr net m neti bci gw1 gwlast topgw g myip
+    for netcidr in ${nets}; do
+        net=${netcidr%/*}
+        [[ -z "${primary_net}" ]] && primary_net="${net}"
+        m=$(mask_int 24); neti=$(( $(ip2int "${net}") & m )); bci=$(( neti | 0xFF ))
+        gw1=$(int2ip $(( neti + 1 ))); gwlast=$(int2ip $(( bci - 1 )))
+        topgw=$(printf '%s\n' ${ranked} | awk -v p="${net%.*}." 'index($0,p)==1{print; exit}')
 
-    # Candidate gateways: the top most-ARPed (reserving room), then the
-    # conventional .1 and last-host. Deduped, and capped at GATEWAY_TRIES so a
-    # noisy segment can't make us try forever. .1 is always included.
-    local cand_gws=() seen=" " keep=$(( GATEWAY_TRIES - 2 )) g n=0
-    (( keep < 1 )) && keep=1
-    for g in ${ranked}; do
-        (( n++ >= keep )) && break
-        case "${seen}" in *" ${g} "*) continue ;; esac
-        cand_gws+=("${g}"); seen+="${g} "
+        if printf '%s\n' ${have_nets} | grep -qx "${netcidr}"; then
+            LOG "already addressed in ${netcidr}"
+        elif myip=$(pick_free_ip "${iface}" "${net}" 24 "${gw1}" "${hosts} ${gw1} ${gwlast} ${topgw}"); then
+            if [[ ${DRY_RUN} -eq 1 ]]; then
+                LOG "WOULD claim ${myip}/24 in ${netcidr}"
+            elif ip addr add "${myip}/24" dev "${iface}" 2>/dev/null; then
+                LOG "claimed ${myip}/24 in ${netcidr}"
+            else
+                LOG "could not add ${myip}/24 in ${netcidr}"
+            fi
+        else
+            LOG "no free address found in ${netcidr}"
+        fi
+
+        for g in "${topgw}" "${gw1}" "${gwlast}"; do
+            [[ -z "${g}" ]] && continue
+            case "${seen_gw}" in *" ${g} "*) continue ;; esac
+            gw_candidates+=("${g}"); seen_gw+="${g} "
+        done
     done
-    for g in "${gw1}" "${gwlast}"; do
-        case "${seen}" in *" ${g} "*) continue ;; esac
-        cand_gws+=("${g}"); seen+="${g} "
+    ip link set "${iface}" up 2>/dev/null || true
+
+    # Default route: keep DHCP's if present; else pick the subnet that actually
+    # reaches the internet.
+    if [[ ${had_l3} -eq 1 ]]; then
+        [[ ${DRY_RUN} -eq 1 ]] && { LOG "dry run complete (DHCP provides the default route)"; exit 0; }
+        LOG "default route already present (DHCP) — left as-is"
+        LOG "auto-network complete; all connected subnets will be advertised via Tailscale"
+        exit 0
+    fi
+
+    # Cap candidates so a noisy multi-subnet segment can't spin.
+    while (( ${#gw_candidates[@]} > GATEWAY_TRIES )); do
+        unset 'gw_candidates[$(( ${#gw_candidates[@]} - 1 ))]'
     done
-
-    LOG "inferred subnet ${net}/${prefix}; gateway candidates: ${cand_gws[*]}"
-
-    # Pick our address, excluding all candidate gateways and known hosts.
-    local cand
-    cand=$(pick_free_ip "${iface}" "${net}" "${prefix}" "${gw1}" "${hosts} ${cand_gws[*]}") \
-        || { LOG "could not find a free address"; exit 1; }
 
     if [[ ${DRY_RUN} -eq 1 ]]; then
-        LOG "WOULD claim ${cand}/${prefix}; would test gateways in order: ${cand_gws[*]}"
-        LOG "observed on-segment hosts: ${hosts:-none}"
+        LOG "WOULD test default gateways in order: ${gw_candidates[*]}"
         LOG "dry run complete — no addresses, routes, or DNS changed"
         exit 0
     fi
 
-    # Claim the address once, then test each gateway until one reaches the internet.
-    if ! ip addr add "${cand}/${prefix}" dev "${iface}" 2>/dev/null; then
-        LOG "failed to assign ${cand}/${prefix}"; exit 1
-    fi
-    ip link set "${iface}" up 2>/dev/null || true
-
-    for g in "${cand_gws[@]}"; do
-        LOG "trying gateway ${g} with ${cand}/${prefix}..."
-        if verify_via "${iface}" "${g}"; then
-            commit "${iface}" "${cand}" "${prefix}" "${g}"
-            LOG "auto-static configuration complete: ${cand}/${prefix} via ${g}"
-            exit 0
-        fi
+    local chosen=""
+    for g in "${gw_candidates[@]}"; do
+        LOG "trying default via ${g}..."
+        if verify_via "${iface}" "${g}"; then chosen="${g}"; break; fi
         LOG "  no internet via ${g}"
     done
-
-    # None verified within the cap: default to .1 as a best guess (unverified) so
-    # the node has a sane config rather than nothing.
-    LOG "no candidate reached the internet — defaulting to ${gw1} (unverified)"
-    ip route replace default via "${gw1}" dev "${iface}" 2>/dev/null || true
-    commit "${iface}" "${cand}" "${prefix}" "${gw1}"
-    LOG "auto-static configuration applied (unverified): ${cand}/${prefix} via ${gw1}"
+    if [[ -z "${chosen}" ]]; then
+        chosen=$(int2ip $(( ($(ip2int "${primary_net}") & $(mask_int 24)) + 1 )))
+        LOG "no candidate reached the internet — defaulting to ${chosen} (unverified)"
+        ip route replace default via "${chosen}" dev "${iface}" 2>/dev/null || true
+    fi
+    commit "${iface}" "${chosen}"
+    LOG "auto-network complete: default via ${chosen}; all connected subnets advertised via Tailscale"
     exit 0
 }
 
