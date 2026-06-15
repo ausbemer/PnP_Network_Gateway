@@ -29,6 +29,7 @@ set -uo pipefail
 DHCP_WAIT="${DHCP_WAIT:-15}"      # seconds to wait for DHCP before falling back
 SNIFF_SECS="${SNIFF_SECS:-20}"    # passive capture window
 ACD_TRIES="${ACD_TRIES:-20}"      # max candidate addresses to conflict-check
+GATEWAY_TRIES="${GATEWAY_TRIES:-5}"  # max gateway candidates to test before defaulting to .1
 PING_TARGETS=(1.1.1.1 9.9.9.9 8.8.8.8)
 
 # --dry-run: sniff, infer, and report what WOULD be configured, changing nothing.
@@ -140,6 +141,15 @@ infer_gateway() {
         | awk 'NR==1{print $2}'
 }
 
+# Ranked list of ARP'd-for IPs (most-requested first), one per line. The real
+# gateway is usually near the top, but not always — so we test several.
+infer_gateways() {
+    grep -oE 'who-has [0-9.]+ tell [0-9.]+' \
+        | awk '{print $2}' \
+        | sort | uniq -c | sort -rn \
+        | awk '{print $2}'
+}
+
 # Hosts known to be on-segment: every "tell X" sender and every "is-at" owner.
 # Capture stdin once: two greps reading the same pipe would race (the first
 # drains it before the second sees anything).
@@ -208,25 +218,26 @@ pick_free_ip() {
     return 1
 }
 
-# ── Tentative configure + verify, with rollback ───────────────────────────────
-try_config() {
-    local iface=$1 ip=$2 prefix=$3 gw=$4 t ok=1
-    LOG "trying ${ip}/${prefix} via ${gw} on ${iface}"
-    ip addr add "${ip}/${prefix}" dev "${iface}" 2>/dev/null || return 1
-    ip route add default via "${gw}" dev "${iface}" 2>/dev/null || true
-    # Gateway must answer at L2/L3, then verify real internet.
-    if ping -c1 -W1 "${gw}" >/dev/null 2>&1; then
-        for t in "${PING_TARGETS[@]}"; do
-            if ping -c1 -W2 "${t}" >/dev/null 2>&1; then ok=0; break; fi
-        done
-    fi
-    if (( ok == 0 )); then
-        LOG "verified internet via ${gw}"
+# ── Connectivity test ─────────────────────────────────────────────────────────
+test_internet() {
+    local t
+    for t in "${PING_TARGETS[@]}"; do
+        ping -c1 -W2 "${t}" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
+# Set the default route via a candidate gateway and verify real internet through
+# it. The address is assumed already assigned. Leaves the route in place on
+# success; removes it on failure so the next candidate starts clean.
+verify_via() {
+    local iface=$1 gw=$2
+    ip route replace default via "${gw}" dev "${iface}" 2>/dev/null || return 1
+    # Gateway must answer at L2/L3 first, then prove actual internet.
+    if ping -c1 -W1 "${gw}" >/dev/null 2>&1 && test_internet; then
         return 0
     fi
-    LOG "no connectivity with ${ip}/${prefix} via ${gw} — rolling back"
     ip route del default via "${gw}" dev "${iface}" 2>/dev/null || true
-    ip addr del "${ip}/${prefix}" dev "${iface}" 2>/dev/null || true
     return 1
 }
 
@@ -266,47 +277,76 @@ main() {
     local cap; cap=$(sniff "${iface}")
     [[ -z "${cap}" ]] && { LOG "captured no traffic; cannot infer network"; exit 1; }
 
-    local gw hosts bcast prefix anchor
-    gw=$(printf '%s\n' "${cap}" | infer_gateway)
+    local ranked hosts bcast prefix anchor net
+    ranked=$(printf '%s\n' "${cap}" | infer_gateways)      # most-ARPed first
     hosts=$(printf '%s\n' "${cap}" | infer_hosts | tr '\n' ' ')
     bcast=$(printf '%s\n' "${cap}" | infer_broadcast)
 
-    # Fall back to .1 then .254 of the densest /24 if no gateway stood out.
-    anchor="${gw:-}"
+    # Anchor for subnet/prefix math: top gateway candidate, else any host.
+    anchor=$(printf '%s\n' ${ranked} | head -1)
     [[ -z "${anchor}" ]] && anchor=$(printf '%s\n' ${hosts} | head -1)
     [[ -z "${anchor}" ]] && { LOG "no host addresses observed; giving up"; exit 1; }
 
     prefix=$(infer_prefix "${anchor}" "${bcast}")
+    local m neti bci gw1 gwlast
+    m=$(mask_int "${prefix}"); neti=$(( $(ip2int "${anchor}") & m ))
+    bci=$(( neti | (0xFFFFFFFF & ~m) ))
+    net=$(int2ip "${neti}")
+    gw1=$(int2ip $(( neti + 1 )))        # conventional .1
+    gwlast=$(int2ip $(( bci - 1 )))      # conventional last host (e.g. .254 on /24)
 
-    if [[ -z "${gw}" ]]; then
-        # Guess gateway as .1 of the inferred subnet.
-        local m neti; m=$(mask_int "${prefix}"); neti=$(( $(ip2int "${anchor}") & m ))
-        gw=$(int2ip $(( neti + 1 )))
-        LOG "no gateway in capture; guessing ${gw}"
-    fi
+    # Candidate gateways: the top most-ARPed (reserving room), then the
+    # conventional .1 and last-host. Deduped, and capped at GATEWAY_TRIES so a
+    # noisy segment can't make us try forever. .1 is always included.
+    local cand_gws=() seen=" " keep=$(( GATEWAY_TRIES - 2 )) g n=0
+    (( keep < 1 )) && keep=1
+    for g in ${ranked}; do
+        (( n++ >= keep )) && break
+        case "${seen}" in *" ${g} "*) continue ;; esac
+        cand_gws+=("${g}"); seen+="${g} "
+    done
+    for g in "${gw1}" "${gwlast}"; do
+        case "${seen}" in *" ${g} "*) continue ;; esac
+        cand_gws+=("${g}"); seen+="${g} "
+    done
 
-    local net; { local m neti; m=$(mask_int "${prefix}"); neti=$(( $(ip2int "${anchor}") & m )); net=$(int2ip "${neti}"); }
-    LOG "inferred subnet ${net}/${prefix}, gateway ${gw}"
+    LOG "inferred subnet ${net}/${prefix}; gateway candidates: ${cand_gws[*]}"
 
+    # Pick our address, excluding all candidate gateways and known hosts.
     local cand
-    cand=$(pick_free_ip "${iface}" "${net}" "${prefix}" "${gw}" "${hosts}") \
+    cand=$(pick_free_ip "${iface}" "${net}" "${prefix}" "${gw1}" "${hosts} ${cand_gws[*]}") \
         || { LOG "could not find a free address"; exit 1; }
 
     if [[ ${DRY_RUN} -eq 1 ]]; then
-        LOG "WOULD configure ${cand}/${prefix} via ${gw} on ${iface}"
+        LOG "WOULD claim ${cand}/${prefix}; would test gateways in order: ${cand_gws[*]}"
         LOG "observed on-segment hosts: ${hosts:-none}"
         LOG "dry run complete — no addresses, routes, or DNS changed"
         exit 0
     fi
 
-    if try_config "${iface}" "${cand}" "${prefix}" "${gw}"; then
-        commit "${iface}" "${cand}" "${prefix}" "${gw}"
-        LOG "auto-static configuration complete: ${cand}/${prefix} via ${gw}"
-        exit 0
+    # Claim the address once, then test each gateway until one reaches the internet.
+    if ! ip addr add "${cand}/${prefix}" dev "${iface}" 2>/dev/null; then
+        LOG "failed to assign ${cand}/${prefix}"; exit 1
     fi
+    ip link set "${iface}" up 2>/dev/null || true
 
-    LOG "auto-static configuration failed"
-    exit 1
+    for g in "${cand_gws[@]}"; do
+        LOG "trying gateway ${g} with ${cand}/${prefix}..."
+        if verify_via "${iface}" "${g}"; then
+            commit "${iface}" "${cand}" "${prefix}" "${g}"
+            LOG "auto-static configuration complete: ${cand}/${prefix} via ${g}"
+            exit 0
+        fi
+        LOG "  no internet via ${g}"
+    done
+
+    # None verified within the cap: default to .1 as a best guess (unverified) so
+    # the node has a sane config rather than nothing.
+    LOG "no candidate reached the internet — defaulting to ${gw1} (unverified)"
+    ip route replace default via "${gw1}" dev "${iface}" 2>/dev/null || true
+    commit "${iface}" "${cand}" "${prefix}" "${gw1}"
+    LOG "auto-static configuration applied (unverified): ${cand}/${prefix} via ${gw1}"
+    exit 0
 }
 
 main "$@"
