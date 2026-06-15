@@ -13,6 +13,7 @@ password — the tailnet membership is the trust boundary. Do not change the bin
 address to 0.0.0.0 without adding authentication first.
 """
 import datetime
+import ipaddress
 import os
 import re
 import socket
@@ -81,61 +82,91 @@ def default_gateway():
     return m.group(1) if m else None
 
 
-def iface_subnet(iface):
-    out = run(["ip", "route", "show", "dev", iface, "proto", "kernel"])
-    m = re.search(r"(\d+\.\d+\.\d+\.\d+/\d+)", out)
-    return m.group(1) if m else None
+def iface_subnets(iface):
+    """Every global IPv4 the interface holds, as {cidr, my_ip} — one per subnet
+    the Pi is multi-homed onto."""
+    out = run(["ip", "-4", "-o", "addr", "show", "dev", iface, "scope", "global"])
+    subs = []
+    for m in re.finditer(r"inet (\d+\.\d+\.\d+\.\d+/\d+)", out):
+        try:
+            ifc = ipaddress.ip_interface(m.group(1))
+            subs.append({"cidr": str(ifc.network), "my_ip": str(ifc.ip)})
+        except ValueError:
+            continue
+    return subs
 
 
 def internet_ok():
-    out = subprocess.run(
-        ["ping", "-c", "1", "-W", "2", "1.1.1.1"],
-        capture_output=True, check=False,
-    )
-    return out.returncode == 0
+    """TCP reachability test (not ICMP) so ICMP-filtering firewalls like the
+    Siemens Scalance don't show a false 'down'."""
+    for host, port in (("1.1.1.1", 443), ("8.8.8.8", 443)):
+        try:
+            with socket.create_connection((host, port), timeout=3):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def net_info():
     lan = default_iface()
+    gw = default_gateway()
+    subs = iface_subnets(lan) if lan else []
+    for s in subs:  # mark the subnet that holds the default gateway
+        s["is_default"] = False
+        if gw:
+            try:
+                s["is_default"] = ipaddress.ip_address(gw) in ipaddress.ip_network(s["cidr"])
+            except ValueError:
+                pass
     return {
         "hostname": socket.gethostname(),
         "tailscale_ip": iface_ipv4(TS_IFACE),
         "lan_iface": lan,
-        "lan_ip": iface_ipv4(lan) if lan else None,
-        "subnet": iface_subnet(lan) if lan else None,
-        "gateway": default_gateway(),
+        "gateway": gw,
         "internet": internet_ok(),
+        "subnets": subs,
     }
 
 
-def scan_devices(iface, gateway, self_ip):
-    """Active arp-scan of the local subnet. Returns a sorted list of dicts."""
-    if not iface:
+def scan_devices(iface, subnets, gateway, my_ips):
+    """Active arp-scan of EACH connected subnet. Returns devices tagged with the
+    subnet they belong to."""
+    if not iface or not subnets:
         return []
-    out = run(
-        ["arp-scan", "--localnet", "--plain", "--interface=" + iface],
-        timeout=SCAN_TIMEOUT,
-    )
-    if not out:  # --plain may be unsupported on older arp-scan; retry plain-ish
-        out = run(["arp-scan", "--localnet", "--interface=" + iface],
-                  timeout=SCAN_TIMEOUT)
+    nets = []
+    for s in subnets:
+        try:
+            nets.append(ipaddress.ip_network(s["cidr"]))
+        except ValueError:
+            pass
     devices = {}
-    line_re = re.compile(
-        r"^(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F:]{17})\s*(.*)$"
-    )
-    for line in out.splitlines():
-        m = line_re.match(line.strip())
-        if not m:
-            continue
-        ip, mac, vendor = m.group(1), m.group(2).lower(), m.group(3).strip()
-        devices[ip] = {  # dedupe by IP; arp-scan can list duplicates
-            "ip": ip,
-            "mac": mac,
-            "vendor": vendor or "—",
-            "is_gateway": ip == gateway,
-            "is_self": ip == self_ip,
-        }
-    return sorted(devices.values(), key=lambda d: tuple(int(o) for o in d["ip"].split(".")))
+    line_re = re.compile(r"^(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F:]{17})\s*(.*)$")
+    for s in subnets:
+        out = run(["arp-scan", "--plain", "--interface=" + iface, s["cidr"]],
+                  timeout=SCAN_TIMEOUT)
+        if not out:  # --plain unsupported on older arp-scan
+            out = run(["arp-scan", "--interface=" + iface, s["cidr"]],
+                      timeout=SCAN_TIMEOUT)
+        for line in out.splitlines():
+            m = line_re.match(line.strip())
+            if not m:
+                continue
+            ip, mac, vendor = m.group(1), m.group(2).lower(), m.group(3).strip()
+            sub = s["cidr"]
+            for n in nets:
+                try:
+                    if ipaddress.ip_address(ip) in n:
+                        sub = str(n)
+                        break
+                except ValueError:
+                    pass
+            devices[ip] = {  # dedupe by IP
+                "ip": ip, "mac": mac, "vendor": vendor or "—", "subnet": sub,
+                "is_gateway": ip == gateway, "is_self": ip in my_ips,
+            }
+    return sorted(devices.values(),
+                  key=lambda d: (d["subnet"], tuple(int(o) for o in d["ip"].split("."))))
 
 
 # ── Device blocking (ARP blackhole) ───────────────────────────────────────────
@@ -310,30 +341,49 @@ PAGE = """<!doctype html>
   <div class="cards">
     <div class="card"><div class="label">LAN interface</div>
       <div class="value">{{ info.lan_iface or "—" }}</div></div>
-    <div class="card"><div class="label">This device</div>
-      <div class="value">{{ info.lan_ip or "—" }}</div></div>
-    <div class="card"><div class="label">Subnet</div>
-      <div class="value">{{ info.subnet or "—" }}</div></div>
-    <div class="card"><div class="label">Gateway</div>
+    <div class="card"><div class="label">Gateway (default)</div>
       <div class="value">{{ info.gateway or "—" }}</div></div>
     <div class="card"><div class="label">Internet</div>
       <div class="value {{ 'ok' if info.internet else 'bad' }}">
         {{ "reachable" if info.internet else "down" }}</div></div>
+    <div class="card"><div class="label">Subnets</div>
+      <div class="value">{{ info.subnets|length }}</div></div>
+    <div class="card"><div class="label">Tailscale</div>
+      <div class="value">{{ info.tailscale_ip or "offline" }}</div></div>
     <div class="card"><div class="label">Devices found</div>
       <div class="value">{{ devices|length }}</div></div>
   </div>
 
   {% if msg %}<div class="notice">{{ msg }}</div>{% endif %}
+
+  <div class="bar">
+    <h2>Subnets{% if info.subnets|length > 1 %} · multi-homed across {{ info.subnets|length }}{% endif %}</h2>
+  </div>
+  <table>
+    <thead><tr><th>Subnet</th><th>This device's IP</th><th>Role</th></tr></thead>
+    <tbody>
+    {% for s in info.subnets %}
+      <tr>
+        <td class="mac">{{ s.cidr }}</td>
+        <td class="mac">{{ s.my_ip }}</td>
+        <td>{% if s.is_default %}<span class="tag gw">default · internet</span>
+            {% else %}<span class="tag self">advertised only</span>{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="3">No subnets configured.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
   {% if not scapy_ok %}<div class="notice">Device blocking is unavailable —
     the packet engine (scapy) isn't installed in this image.</div>{% endif %}
 
   <div class="bar">
-    <h2>Devices on {{ info.subnet or "subnet" }}{% if blocked_count %}
+    <h2>Devices across all subnets{% if blocked_count %}
       · <span class="bad">{{ blocked_count }} blocked</span>{% endif %}</h2>
     <a class="refresh" href="/">↻ Rescan</a>
   </div>
   <table>
-    <thead><tr><th>IP address</th><th>MAC</th><th>Vendor</th><th>Action</th></tr></thead>
+    <thead><tr><th>IP address</th><th>Subnet</th><th>MAC</th><th>Vendor</th><th>Action</th></tr></thead>
     <tbody>
     {% for d in devices %}
       <tr class="{{ 'blocked' if d.blocked else '' }}">
@@ -342,6 +392,7 @@ PAGE = """<!doctype html>
           {% if d.is_self %}<span class="tag self">this device</span>{% endif %}
           {% if d.blocked %}<span class="tag blk">blocked</span>{% endif %}
         </td>
+        <td class="mac">{{ d.subnet }}</td>
         <td class="mac">{{ d.mac }}</td>
         <td>{{ d.vendor }}</td>
         <td>
@@ -363,7 +414,7 @@ PAGE = """<!doctype html>
         </td>
       </tr>
     {% else %}
-      <tr><td colspan="4">No devices found (scan returned nothing).</td></tr>
+      <tr><td colspan="5">No devices found (scan returned nothing).</td></tr>
     {% endfor %}
     </tbody>
   </table>
@@ -376,7 +427,8 @@ PAGE = """<!doctype html>
 @app.route("/")
 def index():
     info = net_info()
-    devices = scan_devices(info["lan_iface"], info["gateway"], info["lan_ip"])
+    my_ips = [s["my_ip"] for s in info["subnets"]]
+    devices = scan_devices(info["lan_iface"], info["subnets"], info["gateway"], my_ips)
     blocked = blocked_ips()
     for d in devices:
         d["blocked"] = d["ip"] in blocked
