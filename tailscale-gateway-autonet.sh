@@ -257,36 +257,46 @@ verify_via() {
     return 1
 }
 
-# ── Persist via NetworkManager so it isn't stripped; fall back to raw ip ───────
-# Persists EVERY global IPv4 address currently on the interface (we may be
-# multi-homed across several subnets) plus the chosen default gateway.
+# ── Keep DHCP as the default behavior (self-heal stale static pins) ────────────
+# A roaming device must try DHCP on every network it's plugged into. Older builds
+# pinned the NM connection to a manual address (to stop NM stripping our config),
+# but that PERMANENTLY broke DHCP on the next network. Here we undo such a pin:
+# if the connection is set to manual, reset it to auto so a lease is requested.
+# Only acts when the method is 'manual', so a healthy DHCP connection is untouched.
+ensure_dhcp_default() {
+    command -v nmcli >/dev/null 2>&1 || return 0
+    local iface=$1 con method
+    con=$(nmcli -t -g GENERAL.CONNECTION device show "${iface}" 2>/dev/null)
+    [[ -z "${con}" ]] && return 0
+    method=$(nmcli -g ipv4.method connection show "${con}" 2>/dev/null)
+    if [[ "${method}" == "manual" ]]; then
+        LOG "NM connection '${con}' was pinned to manual — resetting to DHCP"
+        nmcli con mod "${con}" ipv4.method auto \
+            ipv4.addresses "" ipv4.gateway "" ipv4.dns "" 2>/dev/null || true
+        nmcli con up "${con}" 2>/dev/null || true
+        sleep 2
+    fi
+}
+
+# ── Ensure a working resolver (session-scoped only) ───────────────────────────
+# We deliberately do NOT pin a static NetworkManager profile — that's what broke
+# DHCP portability. Addresses and routes are applied via `ip` for this session
+# and simply re-applied on each boot by this service.
 commit() {
     local iface=$1 gw=$2
-    local addrs
-    addrs=$(ip -4 -o addr show dev "${iface}" scope global 2>/dev/null \
-        | awk '{print $4}' | paste -sd, -)
-    if command -v nmcli >/dev/null 2>&1; then
-        local con
-        con=$(nmcli -t -g GENERAL.CONNECTION device show "${iface}" 2>/dev/null)
-        if [[ -n "${con}" ]]; then
-            LOG "persisting static config on NM connection '${con}': [${addrs}] via ${gw}"
-            nmcli con mod "${con}" \
-                ipv4.method manual \
-                ipv4.addresses "${addrs}" \
-                ipv4.gateway "${gw}" \
-                ipv4.dns "${gw} 1.1.1.1" 2>/dev/null || true
-            nmcli con up "${con}" 2>/dev/null || true
-            return 0
-        fi
+    if ! grep -q '^nameserver' /etc/resolv.conf 2>/dev/null; then
+        { [[ -n "${gw}" ]] && echo "nameserver ${gw}"; echo "nameserver 1.1.1.1"; } \
+            >> /etc/resolv.conf 2>/dev/null || true
     fi
-    LOG "NetworkManager not managing ${iface}; leaving raw ip config in place"
-    grep -q '^nameserver' /etc/resolv.conf 2>/dev/null \
-        || echo "nameserver 1.1.1.1" >> /etc/resolv.conf
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
     setup_logging
+
+    # Self-heal: undo any stale manual NM pin from older builds so DHCP is tried
+    # on this network before we consider auto-static.
+    local hwif; hwif=$(primary_iface) && ensure_dhcp_default "${hwif}"
 
     # Establish which interface and whether we already have L3 (DHCP).
     local had_l3=0 iface
