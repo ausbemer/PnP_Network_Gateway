@@ -68,6 +68,13 @@ Requirements: enable I2C (`raspi-config nonint do_i2c 0`) and install
 Argon's own OLED screen** (in `argonone-config`) so it doesn't fight us for the
 I2C bus — Argon's fan control can stay.
 
+**Images in the rotation:** drop any `.png`/`.bmp`/`.jpg` into
+`/boot/firmware/oled-images/` (it's the FAT boot partition, so you can add them
+by popping the SD into any computer) and the daemon converts each to 1-bit and
+cycles it in alongside the status pages. Bold, high-contrast art works best on a
+1-bit 128×64 panel; the daemon auto-fits and centers it (threshold tunable via
+`OLED_IMG_THRESHOLD`).
+
 The dashboard also shows the **autonet log** (the `autonet log →` link), reading
 `autonet.log` from the boot partition. `autonet` writes that file on every run,
 so you can diagnose a no-DHCP boot either over the tailnet (success) or by

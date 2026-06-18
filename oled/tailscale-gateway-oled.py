@@ -19,7 +19,7 @@ import time
 from luma.core.interface.serial import i2c
 from luma.oled.device import ssd1306
 from luma.core.render import canvas
-from PIL import ImageFont
+from PIL import Image
 
 I2C_PORT = int(os.environ.get("OLED_I2C_PORT", "1"))
 I2C_ADDR = int(os.environ.get("OLED_I2C_ADDR", "0x3c"), 16)
@@ -28,6 +28,10 @@ PAGE_SECS = float(os.environ.get("OLED_PAGE_SECS", "5"))
 MSG_TTL = float(os.environ.get("OLED_MSG_TTL", "25"))
 LINE_H = 11          # pixels per line; ~5-6 lines on a 128x64 panel
 MAX_COLS = 21        # chars per line at the default font on 128px
+# Drop .png/.bmp/.jpg images here to add them to the rotation. On a Pi this is
+# the FAT boot partition, so you can add images by popping the SD in any computer.
+IMAGE_DIR = os.environ.get("OLED_IMAGE_DIR", "/boot/firmware/oled-images")
+IMG_THRESHOLD = int(os.environ.get("OLED_IMG_THRESHOLD", "128"))  # 0-255 b/w cutoff
 
 
 def run(cmd):
@@ -110,7 +114,7 @@ def message_lines():
     return None
 
 
-def render(device, font, lines):
+def render_text(device, lines):
     with canvas(device) as draw:
         y = 0
         for ln in lines[:6]:
@@ -118,18 +122,46 @@ def render(device, font, lines):
             y += LINE_H
 
 
+def image_files():
+    try:
+        return sorted(
+            os.path.join(IMAGE_DIR, f) for f in os.listdir(IMAGE_DIR)
+            if f.lower().endswith((".png", ".bmp", ".jpg", ".jpeg", ".gif", ".xbm")))
+    except OSError:
+        return []
+
+
+def render_image(device, path):
+    """Convert any image to 1-bit, fit it centered on the panel, and show it."""
+    try:
+        img = Image.open(path).convert("L")
+    except Exception:
+        return False
+    img = img.point(lambda p: 255 if p > IMG_THRESHOLD else 0).convert("1")
+    img.thumbnail(device.size)  # fit, preserving aspect ratio
+    frame = Image.new("1", device.size, 0)
+    frame.paste(img, ((device.size[0] - img.size[0]) // 2,
+                      (device.size[1] - img.size[1]) // 2))
+    device.display(frame)
+    return True
+
+
 def loop():
     serial = i2c(port=I2C_PORT, address=I2C_ADDR)
     device = ssd1306(serial)            # 128x64
-    font = ImageFont.load_default()
     idx = 0
     while True:
         msg = message_lines()
         if msg:
-            render(device, font, msg)
+            render_text(device, msg)
         else:
-            pages = standing_pages()
-            render(device, font, pages[idx % len(pages)])
+            pages = [("text", p) for p in standing_pages()]
+            pages += [("image", p) for p in image_files()]
+            kind, payload = pages[idx % len(pages)]
+            if kind == "image" and not render_image(device, payload):
+                render_text(device, ["(bad image)", os.path.basename(payload)])
+            elif kind == "text":
+                render_text(device, payload)
             idx += 1
         time.sleep(PAGE_SECS)
 

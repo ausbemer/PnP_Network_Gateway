@@ -68,6 +68,15 @@ echo "--> Copying OLED daemon + tsg-oled helper to /usr/local/bin/"
 install -m 755 "${SCRIPT_DIR}/oled/tailscale-gateway-oled.py" /usr/local/bin/tailscale-gateway-oled.py
 install -m 755 "${SCRIPT_DIR}/oled/tsg-oled" /usr/local/bin/tsg-oled
 
+# Folder for OLED rotation images (drop .png/.bmp/.jpg here). Prefer the FAT boot
+# partition so images can be added by popping the SD into any computer.
+OLED_IMG_DIR="/boot/firmware/oled-images"; [[ -d /boot/firmware ]] || OLED_IMG_DIR="/boot/oled-images"
+install -d -m 755 "${OLED_IMG_DIR}" 2>/dev/null || true
+# If the repo ships any sample images, seed them in.
+if [[ -d "${SCRIPT_DIR}/oled/images" ]]; then
+    cp -n "${SCRIPT_DIR}/oled/images/"* "${OLED_IMG_DIR}/" 2>/dev/null || true
+fi
+
 # ── 2. Systemd units ──────────────────────────────────────────────────────────
 echo "--> Installing systemd unit tailscale-gateway.service"
 install -m 644 "${SCRIPT_DIR}/tailscale-gateway.service" /etc/systemd/system/tailscale-gateway.service
