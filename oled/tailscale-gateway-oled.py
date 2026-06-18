@@ -19,7 +19,7 @@ import time
 from luma.core.interface.serial import i2c
 from luma.oled.device import ssd1306
 from luma.core.render import canvas
-from PIL import Image
+from PIL import Image, ImageOps
 
 I2C_PORT = int(os.environ.get("OLED_I2C_PORT", "1"))
 I2C_ADDR = int(os.environ.get("OLED_I2C_ADDR", "0x3c"), 16)
@@ -32,6 +32,9 @@ MAX_COLS = 21        # chars per line at the default font on 128px
 # the FAT boot partition, so you can add images by popping the SD in any computer.
 IMAGE_DIR = os.environ.get("OLED_IMAGE_DIR", "/boot/firmware/oled-images")
 IMG_THRESHOLD = int(os.environ.get("OLED_IMG_THRESHOLD", "128"))  # 0-255 b/w cutoff
+# Invert all images by default? Per-image override: put "invert" in the filename
+# (e.g. "s-invert.png") to flip just that one — black art on a white background.
+IMG_INVERT_DEFAULT = os.environ.get("OLED_IMG_INVERT", "0") not in ("0", "", "false", "no")
 
 
 def run(cmd):
@@ -142,6 +145,10 @@ def render_image(device, path):
     frame = Image.new("1", device.size, 0)
     frame.paste(img, ((device.size[0] - img.size[0]) // 2,
                       (device.size[1] - img.size[1]) // 2))
+    name = os.path.basename(path).lower()
+    if IMG_INVERT_DEFAULT or "invert" in name or "-inv" in name:
+        # Flip the whole frame: white background fills the panel, art goes black.
+        frame = ImageOps.invert(frame.convert("L")).convert("1")
     device.display(frame)
     return True
 
