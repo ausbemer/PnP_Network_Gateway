@@ -1,0 +1,12 @@
+[Unit]
+Description=Tailscale Gateway OLED status display (Argon One V5 / SSD1306)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tailscale-gateway-oled.py
+Restart=always
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

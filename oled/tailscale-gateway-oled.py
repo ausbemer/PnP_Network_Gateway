@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""
+OLED status display for the Tailscale gateway (Argon One V5 / SSD1306 @ 0x3c).
+
+Cycles through auto-derived diagnostics (hostname, Tailscale IP, internet,
+gateway, subnets) and shows any transient message pushed by the rest of the
+program via the `tsg-oled` helper (which writes /run/tailscale-gateway/oled.msg).
+
+Drive the panel ourselves with luma.oled — do NOT also run Argon's OLED daemon,
+or the two will fight over the I2C bus. Keep Argon's fan control; just disable
+its screen in `argonone-config`.
+"""
+import os
+import re
+import socket
+import subprocess
+import time
+
+from luma.core.interface.serial import i2c
+from luma.oled.device import ssd1306
+from luma.core.render import canvas
+from PIL import ImageFont
+
+I2C_PORT = int(os.environ.get("OLED_I2C_PORT", "1"))
+I2C_ADDR = int(os.environ.get("OLED_I2C_ADDR", "0x3c"), 16)
+MSG_FILE = os.environ.get("OLED_MSG_FILE", "/run/tailscale-gateway/oled.msg")
+PAGE_SECS = float(os.environ.get("OLED_PAGE_SECS", "5"))
+MSG_TTL = float(os.environ.get("OLED_MSG_TTL", "25"))
+LINE_H = 11          # pixels per line; ~5-6 lines on a 128x64 panel
+MAX_COLS = 21        # chars per line at the default font on 128px
+
+
+def run(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return ""
+
+
+def ts_ip():
+    m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)",
+                  run(["ip", "-4", "-o", "addr", "show", "tailscale0"]))
+    return m.group(1) if m else None
+
+
+def default_iface_gw():
+    out = run(["ip", "route", "show", "default"])
+    mi = re.search(r"dev (\S+)", out)
+    mg = re.search(r"via (\d+\.\d+\.\d+\.\d+)", out)
+    return (mi.group(1) if mi else None, mg.group(1) if mg else None)
+
+
+def subnets(iface):
+    if not iface:
+        return []
+    out = run(["ip", "-4", "-o", "route", "show", "dev", iface, "proto", "kernel"])
+    return re.findall(r"(\d+\.\d+\.\d+\.\d+/\d+)", out)
+
+
+def internet():
+    for hp in (("1.1.1.1", 443), ("8.8.8.8", 443)):
+        try:
+            with socket.create_connection(hp, timeout=3):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def standing_pages():
+    iface, gw = default_iface_gw()
+    subs = subnets(iface)
+    pages = [[
+        socket.gethostname(),
+        "TS : " + (ts_ip() or "offline"),
+        "Net: " + ("up" if internet() else "DOWN"),
+    ], [
+        "Gateway:",
+        gw or "(none)",
+        "Iface: " + (iface or "-"),
+    ]]
+    if subs:
+        pages.append(["Subnets (%d):" % len(subs)] + subs[:5])
+    return pages
+
+
+def message_lines():
+    """Lines from the push file if fresh, else None."""
+    try:
+        if time.time() - os.path.getmtime(MSG_FILE) <= MSG_TTL:
+            with open(MSG_FILE) as f:
+                return [ln.rstrip("\n") for ln in f if ln.strip()][:6]
+    except OSError:
+        pass
+    return None
+
+
+def render(device, font, lines):
+    with canvas(device) as draw:
+        y = 0
+        for ln in lines[:6]:
+            draw.text((0, y), ln[:MAX_COLS], fill="white")
+            y += LINE_H
+
+
+def loop():
+    serial = i2c(port=I2C_PORT, address=I2C_ADDR)
+    device = ssd1306(serial)            # 128x64
+    font = ImageFont.load_default()
+    idx = 0
+    while True:
+        msg = message_lines()
+        if msg:
+            render(device, font, msg)
+        else:
+            pages = standing_pages()
+            render(device, font, pages[idx % len(pages)])
+            idx += 1
+        time.sleep(PAGE_SECS)
+
+
+if __name__ == "__main__":
+    # Resilient: if the bus is busy (e.g. Argon's OLED daemon still running) or
+    # the panel isn't present, log once and keep retrying rather than crash.
+    while True:
+        try:
+            loop()
+        except Exception as e:
+            print(f"oled: {e}; retrying in 15s "
+                  f"(is Argon's OLED daemon disabled? is 0x3c present?)", flush=True)
+            time.sleep(15)

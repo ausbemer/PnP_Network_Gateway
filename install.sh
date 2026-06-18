@@ -64,6 +64,10 @@ install -m 644 "${SCRIPT_DIR}/dashboard/app.py"          /opt/tailscale-gateway-
 install -m 644 "${SCRIPT_DIR}/dashboard/requirements.txt" /opt/tailscale-gateway-dashboard/requirements.txt
 install -m 644 "${SCRIPT_DIR}/dashboard/Dockerfile"      /opt/tailscale-gateway-dashboard/Dockerfile
 
+echo "--> Copying OLED daemon + tsg-oled helper to /usr/local/bin/"
+install -m 755 "${SCRIPT_DIR}/oled/tailscale-gateway-oled.py" /usr/local/bin/tailscale-gateway-oled.py
+install -m 755 "${SCRIPT_DIR}/oled/tsg-oled" /usr/local/bin/tsg-oled
+
 # ── 2. Systemd units ──────────────────────────────────────────────────────────
 echo "--> Installing systemd unit tailscale-gateway.service"
 install -m 644 "${SCRIPT_DIR}/tailscale-gateway.service" /etc/systemd/system/tailscale-gateway.service
@@ -76,6 +80,9 @@ install -m 644 "${SCRIPT_DIR}/tailscale-gateway-autonet.service" /etc/systemd/sy
 
 echo "--> Installing systemd unit tailscale-gateway-dashboard.service"
 install -m 644 "${SCRIPT_DIR}/tailscale-gateway-dashboard.service" /etc/systemd/system/tailscale-gateway-dashboard.service
+
+echo "--> Installing systemd unit tailscale-gateway-oled.service"
+install -m 644 "${SCRIPT_DIR}/tailscale-gateway-oled.service" /etc/systemd/system/tailscale-gateway-oled.service
 
 # ── 3. IP forwarding ─────────────────────────────────────────────────────────
 echo "--> Enabling IP forwarding"
@@ -108,6 +115,12 @@ systemctl enable tailscale-gateway-autonet.service
 systemctl enable tailscale-gateway.service
 systemctl enable tailscale-gateway-watch.service
 systemctl enable tailscale-gateway-dashboard.service
+systemctl enable tailscale-gateway-oled.service
+
+# The OLED display is independent of the tailnet (it just shows status), so
+# (re)start it now regardless of whether an auth key is present.
+echo "--> (Re)starting tailscale-gateway-oled.service"
+systemctl restart tailscale-gateway-oled.service || true
 
 if [[ -f /etc/tailscale-gateway/authkey ]]; then
     # Use restart (not start) so re-running install.sh after a `git pull`

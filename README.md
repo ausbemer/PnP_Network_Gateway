@@ -54,6 +54,20 @@ separate password. Reach it at `http://<device-tailscale-ip>:8088` (or via
 MagicDNS, `http://<hostname>:8088`). Do not rebind it to `0.0.0.0` without adding
 authentication, as that would expose it to the LAN.
 
+### OLED status display (Argon One V5)
+
+If the Pi is in an Argon One V5 with the OLED module (SSD1306 @ `0x3c`), the
+`tailscale-gateway-oled` service drives it directly with `luma.oled`, cycling
+through hostname, Tailscale IP, internet status, gateway, and the connected
+subnets. Any part of the program can flash a transient message to it with the
+`tsg-oled` helper, e.g. `tsg-oled "autonet" "via 172.30.0.1"`; the daemon shows
+it for ~25s then resumes the rotating pages.
+
+Requirements: enable I2C (`raspi-config nonint do_i2c 0`) and install
+`i2c-tools python3-luma.oled python3-pil` (the image does both). **Disable
+Argon's own OLED screen** (in `argonone-config`) so it doesn't fight us for the
+I2C bus — Argon's fan control can stay.
+
 The dashboard also shows the **autonet log** (the `autonet log →` link), reading
 `autonet.log` from the boot partition. `autonet` writes that file on every run,
 so you can diagnose a no-DHCP boot either over the tailnet (success) or by
@@ -69,6 +83,8 @@ pulling the SD card and reading the FAT partition directly (failure).
 | `tailscale-gateway-watch.service`| systemd unit running the watcher. |
 | `tailscale-gateway-autonet.sh`   | DHCP fallback: sniffs a DHCP-less network, infers subnet/gateway, picks a free IP (with conflict detection), and self-configures. |
 | `tailscale-gateway-autonet.service`| systemd unit running auto-network setup before the gateway. |
+| `oled/`                          | OLED status daemon + `tsg-oled` write helper (Argon One V5 / SSD1306). |
+| `tailscale-gateway-oled.service` | systemd unit running the OLED daemon. |
 | `dashboard/`                     | Flask app + Dockerfile for the tailnet-only status web UI. |
 | `start-tailscale-dashboard.sh`   | Builds (if needed) and runs the dashboard container. |
 | `tailscale-gateway-dashboard.service`| systemd unit running the dashboard. |

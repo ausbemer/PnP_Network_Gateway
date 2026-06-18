@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# tsg-oled — push a transient message to the gateway OLED.
+# Each argument becomes one line (max ~6 lines, ~21 chars each). The OLED daemon
+# shows it for OLED_MSG_TTL seconds (default 25), then returns to the rotating
+# status pages.
+#
+# Examples:
+#   tsg-oled "autonet" "via 172.30.0.1"
+#   tsg-oled "BLOCKING" "192.168.0.5"
+MSG_FILE="${OLED_MSG_FILE:-/run/tailscale-gateway/oled.msg}"
+mkdir -p "$(dirname "${MSG_FILE}")"
+{ for line in "$@"; do printf '%s\n' "${line}"; done; } > "${MSG_FILE}"

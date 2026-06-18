@@ -45,6 +45,16 @@ apt-get update
 apt-get install -y tcpdump arp-scan lldpd ndisc6 iputils-arping
 systemctl enable lldpd 2>/dev/null || true
 
+# ── OLED status display (Argon One V5 / SSD1306) ──────────────────────────────
+echo "--> Installing OLED tooling and enabling I2C..."
+apt-get install -y i2c-tools python3-luma.oled python3-pil
+# Enable the I2C bus so /dev/i2c-1 exists for the OLED.
+if command -v raspi-config >/dev/null 2>&1; then
+    raspi-config nonint do_i2c 0 2>/dev/null || true
+fi
+grep -q '^dtparam=i2c_arm=on' /boot/firmware/config.txt 2>/dev/null \
+    || echo 'dtparam=i2c_arm=on' >> /boot/firmware/config.txt 2>/dev/null || true
+
 # ── 1. Install Docker (idempotent) ────────────────────────────────────────────
 if ! command -v docker &>/dev/null; then
     echo "--> Installing Docker via get.docker.com..."
