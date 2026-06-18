@@ -38,7 +38,7 @@ docker run -d \
     -e DASHBOARD_PORT="${PORT}" \
     -e TS_IFACE="${TS_IFACE}" \
     -e AUTONET_LOG="/bootfw/autonet.log" \
-    -v "${BOOT_DIR}:/bootfw:ro" \
+    -v "${BOOT_DIR}:/bootfw:rw" \
     "${IMAGE}"
 
 echo "Dashboard started. Once Tailscale is up, browse to:"

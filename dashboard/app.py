@@ -16,6 +16,7 @@ import datetime
 import ipaddress
 import os
 import re
+import shutil
 import socket
 import subprocess
 import threading
@@ -37,6 +38,9 @@ PORT = int(os.environ.get("DASHBOARD_PORT", "8088"))
 TS_IFACE = os.environ.get("TS_IFACE", "tailscale0")
 SCAN_TIMEOUT = int(os.environ.get("SCAN_TIMEOUT", "15"))
 AUTONET_LOG = os.environ.get("AUTONET_LOG", "/bootfw/autonet.log")
+# Archived logs are moved here (kept for the record but NOT shown in the log view).
+ARCHIVE_DIR = os.environ.get(
+    "AUTONET_ARCHIVE", os.path.join(os.path.dirname(AUTONET_LOG), "autonet-archive"))
 
 # A MAC that (almost certainly) belongs to no one on the segment. Poisoned
 # victims send their gateway traffic here, where it goes nowhere — a true
@@ -478,11 +482,24 @@ LOG_PAGE = """<!doctype html>
         padding: 16px; overflow-x: auto; font-family: ui-monospace, monospace;
         font-size: .82rem; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
   .path { color: #8b949e; font-size: .8rem; margin-bottom: 10px; }
+  .btn { font: inherit; font-size: .82rem; padding: 4px 12px; border-radius: 6px;
+         border: 1px solid #3b434b; background: #21262d; color: #e6edf3; cursor: pointer; }
+  .notice { background: #161b22; border: 1px solid #3b2a12; color: #d29922;
+            border-radius: 8px; padding: 8px 12px; font-size: .82rem; margin-bottom: 12px; }
 </style></head>
 <body>
-<header><h1>autonet log</h1><a href="/">← back to status</a></header>
+<header><h1>autonet log</h1>
+  <span>
+    <form method="post" action="/archive-log" style="display:inline"
+          onsubmit="return confirm('Move the current log to the archive folder and clear it?')">
+      <button class="btn">Archive log</button>
+    </form>
+    <a href="/" style="margin-left:14px">← back to status</a>
+  </span>
+</header>
 <main>
-  <div class="path">{{ path }}</div>
+  {% if msg %}<div class="notice">{{ msg }}</div>{% endif %}
+  <div class="path">{{ path }}{% if archived %} · {{ archived }} archived in {{ archive_dir }}{% endif %}</div>
   <pre>{{ log }}</pre>
 </main></body></html>"""
 
@@ -498,7 +515,29 @@ def autonet_log():
                "lease, or it hasn't run on this boot)")
     except Exception as e:
         log = f"(could not read {AUTONET_LOG}: {e})"
-    return render_template_string(LOG_PAGE, log=log, path=AUTONET_LOG)
+    try:
+        archived = len([f for f in os.listdir(ARCHIVE_DIR) if f.endswith(".log")])
+    except OSError:
+        archived = 0
+    return render_template_string(
+        LOG_PAGE, log=log, path=AUTONET_LOG, msg=request.args.get("msg"),
+        archived=archived, archive_dir=ARCHIVE_DIR)
+
+
+@app.route("/archive-log", methods=["POST"])
+def archive_log():
+    """Move the current log to the archive folder and clear the active one. The
+    archive is kept on disk but never shown in the log view."""
+    try:
+        if not (os.path.exists(AUTONET_LOG) and os.path.getsize(AUTONET_LOG) > 0):
+            return redirect("/log?msg=Nothing+to+archive")
+        os.makedirs(ARCHIVE_DIR, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        dest = os.path.join(ARCHIVE_DIR, f"autonet-{ts}.log")
+        shutil.move(AUTONET_LOG, dest)
+        return redirect("/log?msg=Archived+to+" + os.path.basename(dest))
+    except Exception as e:
+        return redirect("/log?msg=Archive+failed:+" + str(e).replace(" ", "+"))
 
 
 @app.route("/healthz")
