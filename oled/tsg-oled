@@ -8,5 +8,8 @@
 #   tsg-oled "autonet" "via 172.30.0.1"
 #   tsg-oled "BLOCKING" "192.168.0.5"
 MSG_FILE="${OLED_MSG_FILE:-/run/tailscale-gateway/oled.msg}"
+TTL="${OLED_MSG_TTL:-25}"
 mkdir -p "$(dirname "${MSG_FILE}")"
-{ for line in "$@"; do printf '%s\n' "${line}"; done; } > "${MSG_FILE}"
+# First line is an expiry epoch; the OLED daemon shows the message until then.
+{ echo $(( $(date +%s) + TTL )); for line in "$@"; do printf '%s\n' "${line}"; done; } \
+    > "${MSG_FILE}"

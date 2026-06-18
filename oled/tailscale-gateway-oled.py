@@ -85,13 +85,28 @@ def standing_pages():
 
 
 def message_lines():
-    """Lines from the push file if fresh, else None."""
+    """Lines to show from the push file, honoring its header line:
+       'sticky'        -> show until cleared (dashboard messages)
+       <expiry epoch>  -> show until that time (tsg-oled messages)
+    A header-less file is treated as legacy and shown for MSG_TTL by mtime."""
     try:
-        if time.time() - os.path.getmtime(MSG_FILE) <= MSG_TTL:
-            with open(MSG_FILE) as f:
-                return [ln.rstrip("\n") for ln in f if ln.strip()][:6]
+        with open(MSG_FILE) as f:
+            raw = [ln.rstrip("\n") for ln in f]
     except OSError:
-        pass
+        return None
+    if not raw:
+        return None
+    head, body = raw[0].strip(), [ln for ln in raw[1:] if ln.strip()]
+    if head == "sticky":
+        return body[:6] or None
+    try:
+        return (body[:6] or None) if time.time() <= float(head) else None
+    except ValueError:
+        try:  # legacy header-less file
+            if time.time() - os.path.getmtime(MSG_FILE) <= MSG_TTL:
+                return [ln for ln in raw if ln.strip()][:6] or None
+        except OSError:
+            pass
     return None
 
 

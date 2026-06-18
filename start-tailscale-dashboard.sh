@@ -38,7 +38,9 @@ docker run -d \
     -e DASHBOARD_PORT="${PORT}" \
     -e TS_IFACE="${TS_IFACE}" \
     -e AUTONET_LOG="/bootfw/autonet.log" \
+    -e OLED_MSG_FILE="/run/tailscale-gateway/oled.msg" \
     -v "${BOOT_DIR}:/bootfw:rw" \
+    -v /run/tailscale-gateway:/run/tailscale-gateway:rw \
     "${IMAGE}"
 
 echo "Dashboard started. Once Tailscale is up, browse to:"

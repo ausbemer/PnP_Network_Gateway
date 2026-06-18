@@ -41,6 +41,10 @@ AUTONET_LOG = os.environ.get("AUTONET_LOG", "/bootfw/autonet.log")
 # Archived logs are moved here (kept for the record but NOT shown in the log view).
 ARCHIVE_DIR = os.environ.get(
     "AUTONET_ARCHIVE", os.path.join(os.path.dirname(AUTONET_LOG), "autonet-archive"))
+# Message file the OLED daemon reads. Dashboard messages are written "sticky"
+# (shown until cleared); the tsg-oled CLI writes time-limited ones.
+OLED_MSG_FILE = os.environ.get("OLED_MSG_FILE", "/run/tailscale-gateway/oled.msg")
+OLED_COLS, OLED_ROWS = 21, 6   # SSD1306 128x64 at the default font
 
 # A MAC that (almost certainly) belongs to no one on the segment. Poisoned
 # victims send their gateway traffic here, where it goes nowhere — a true
@@ -360,6 +364,16 @@ PAGE = """<!doctype html>
 
   {% if msg %}<div class="notice">{{ msg }}</div>{% endif %}
 
+  <div class="bar"><h2>OLED message</h2></div>
+  <form method="post" action="/oled" style="display:flex; gap:8px; margin-bottom:8px">
+    <input name="text" maxlength="120" autocomplete="off"
+           placeholder="Send a message to the screen…"
+           style="flex:1; background:#161b22; border:1px solid #3b434b; color:#e6edf3;
+                  border-radius:6px; padding:6px 10px; font:inherit; font-size:.9rem">
+    <button class="btn block">Send</button>
+    <button class="btn unblock" formaction="/oled-clear">Clear</button>
+  </form>
+
   <div class="bar">
     <h2>Subnets{% if info.subnets|length > 1 %} · multi-homed across {{ info.subnets|length }}{% endif %}</h2>
   </div>
@@ -538,6 +552,55 @@ def archive_log():
         return redirect("/log?msg=Archived+to+" + os.path.basename(dest))
     except Exception as e:
         return redirect("/log?msg=Archive+failed:+" + str(e).replace(" ", "+"))
+
+
+def oled_wrap(text, width=OLED_COLS, maxlines=OLED_ROWS):
+    """Word-wrap text into OLED-sized lines, breaking over-long tokens."""
+    out, cur = [], ""
+    for w in text.split():
+        while len(w) > width:
+            if cur:
+                out.append(cur); cur = ""
+            out.append(w[:width]); w = w[width:]
+            if len(out) >= maxlines:
+                return out[:maxlines]
+        if not cur:
+            cur = w
+        elif len(cur) + 1 + len(w) <= width:
+            cur += " " + w
+        else:
+            out.append(cur); cur = w
+            if len(out) >= maxlines:
+                return out[:maxlines]
+    if cur and len(out) < maxlines:
+        out.append(cur)
+    return out[:maxlines]
+
+
+@app.route("/oled", methods=["POST"])
+def oled_send():
+    text = (request.form.get("text") or "").strip()
+    if not text:
+        return redirect("/?msg=Empty+message")
+    lines = oled_wrap(text)
+    try:
+        os.makedirs(os.path.dirname(OLED_MSG_FILE), exist_ok=True)
+        # "sticky" header => OLED daemon shows it until cleared.
+        with open(OLED_MSG_FILE, "w") as f:
+            f.write("sticky\n" + "\n".join(lines) + "\n")
+        return redirect("/?msg=Sent+to+OLED")
+    except Exception as e:
+        return redirect("/?msg=OLED+send+failed:+" + str(e).replace(" ", "+"))
+
+
+@app.route("/oled-clear", methods=["POST"])
+def oled_clear():
+    try:
+        if os.path.exists(OLED_MSG_FILE):
+            os.remove(OLED_MSG_FILE)
+        return redirect("/?msg=OLED+cleared")
+    except Exception as e:
+        return redirect("/?msg=OLED+clear+failed:+" + str(e).replace(" ", "+"))
 
 
 @app.route("/healthz")
