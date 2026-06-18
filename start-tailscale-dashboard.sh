@@ -17,6 +17,12 @@ TS_IFACE="${TS_IFACE:-tailscale0}"
 BOOT_DIR="/boot/firmware"
 [[ -d "${BOOT_DIR}" ]] || BOOT_DIR="/boot"
 
+# NVMe (or any) storage exposed by the dashboard file explorer. Mount your SSD
+# at this path on the host; if it's empty/unmounted the explorer just shows it
+# as empty. Override with NVME_MOUNT=/path before starting.
+NVME_MOUNT="${NVME_MOUNT:-/mnt/nvme}"
+mkdir -p "${NVME_MOUNT}" 2>/dev/null || true
+
 # ── Build the image every start (Docker layer cache makes this a near-instant ──
 # ── no-op when nothing changed, but it ensures app.py updates are picked up   ──
 # ── after a `git pull` + reinstall). ──────────────────────────────────────────
@@ -39,8 +45,10 @@ docker run -d \
     -e TS_IFACE="${TS_IFACE}" \
     -e AUTONET_LOG="/bootfw/autonet.log" \
     -e OLED_MSG_FILE="/run/tailscale-gateway/oled.msg" \
+    -e FILES_ROOT="/data" \
     -v "${BOOT_DIR}:/bootfw:rw" \
     -v /run/tailscale-gateway:/run/tailscale-gateway:rw \
+    -v "${NVME_MOUNT}:/data:rw" \
     "${IMAGE}"
 
 echo "Dashboard started. Once Tailscale is up, browse to:"

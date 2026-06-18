@@ -22,7 +22,9 @@ import subprocess
 import threading
 import time
 
-from flask import Flask, redirect, render_template_string, request
+from flask import (Flask, abort, redirect, render_template_string, request,
+                   send_file)
+from urllib.parse import quote
 
 # scapy is only needed for the (optional) device-blocking feature. Import it
 # defensively so the dashboard still runs if it isn't installed.
@@ -45,6 +47,8 @@ ARCHIVE_DIR = os.environ.get(
 # (shown until cleared); the tsg-oled CLI writes time-limited ones.
 OLED_MSG_FILE = os.environ.get("OLED_MSG_FILE", "/run/tailscale-gateway/oled.msg")
 OLED_COLS, OLED_ROWS = 21, 6   # SSD1306 128x64 at the default font
+# Root of the file explorer (the NVMe mount, bind-mounted into the container).
+FILES_ROOT = os.environ.get("FILES_ROOT", "/data")
 
 # A MAC that (almost certainly) belongs to no one on the segment. Poisoned
 # victims send their gateway traffic here, where it goes nowhere — a true
@@ -341,6 +345,7 @@ PAGE = """<!doctype html>
 <header>
   <h1>{{ info.hostname }}</h1>
   <div>
+    <a class="refresh" href="/files" style="margin-right:16px">files →</a>
     <a class="refresh" href="/log" style="margin-right:16px">autonet log →</a>
     <span class="ts">{{ info.tailscale_ip or "tailscale: offline" }}</span>
   </div>
@@ -601,6 +606,210 @@ def oled_clear():
         return redirect("/?msg=OLED+cleared")
     except Exception as e:
         return redirect("/?msg=OLED+clear+failed:+" + str(e).replace(" ", "+"))
+
+
+# ── File explorer (scoped to the NVMe mount) ──────────────────────────────────
+def _safe(rel):
+    """Resolve a relative path under FILES_ROOT, rejecting any escape (../,
+    absolute paths, symlinks pointing out). Returns abs path or None."""
+    base = os.path.realpath(FILES_ROOT)
+    full = os.path.realpath(os.path.join(base, (rel or "").lstrip("/")))
+    if full == base or full.startswith(base + os.sep):
+        return full
+    return None
+
+
+def _hsize(n):
+    if n is None:
+        return ""
+    n = float(n)
+    for u in ("B", "K", "M", "G", "T"):
+        if n < 1024:
+            return f"{n:.0f}{u}" if u == "B" else f"{n:.1f}{u}"
+        n /= 1024
+    return f"{n:.1f}P"
+
+
+def _relto_root(full):
+    base = os.path.realpath(FILES_ROOT)
+    rel = os.path.relpath(full, base)
+    return "" if rel == "." else rel
+
+
+FILES_PAGE = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Files</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: #0f1419; color: #e6edf3; }
+  header { padding: 18px 24px; border-bottom: 1px solid #222b34;
+           display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+  header h1 { font-size: 1.1rem; margin: 0; }
+  a { color: #58a6ff; text-decoration: none; }
+  main { padding: 20px 24px; max-width: 980px; margin: 0 auto; }
+  .du { color: #8b949e; font-size: .82rem; margin-bottom: 12px; }
+  .crumbs { margin-bottom: 12px; font-family: ui-monospace, monospace; font-size: .9rem; }
+  table { width: 100%; border-collapse: collapse; }
+  th,td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #222b34; font-size: .9rem; }
+  th { color: #8b949e; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; }
+  td.sz { font-family: ui-monospace, monospace; color: #8b949e; text-align: right; white-space: nowrap; }
+  .btn { font: inherit; font-size: .8rem; padding: 3px 10px; border-radius: 6px; cursor: pointer;
+         border: 1px solid #3b434b; background: #21262d; color: #e6edf3; }
+  .btn.del { background: #b62324; border-color: #b62324; color: #fff; }
+  form.inline { display: inline; }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; margin: 18px 0; align-items: center; }
+  input[type=text] { background: #161b22; border: 1px solid #3b434b; color: #e6edf3;
+                     border-radius: 6px; padding: 6px 10px; font: inherit; }
+  .notice { background: #161b22; border: 1px solid #3b2a12; color: #d29922;
+            border-radius: 8px; padding: 8px 12px; font-size: .82rem; margin-bottom: 12px; }
+</style></head>
+<body>
+<header><h1>Files</h1><a href="/">← back to status</a></header>
+<main>
+  {% if msg %}<div class="notice">{{ msg }}</div>{% endif %}
+  {% if disk %}<div class="du">Storage: {{ disk.used }} used of {{ disk.total }}
+    · {{ disk.free }} free</div>{% endif %}
+
+  <div class="crumbs">
+    <a href="/files">root</a>{% for c in crumbs %} / <a href="/files?path={{ c.rel|urlencode }}">{{ c.name }}</a>{% endfor %}
+  </div>
+
+  <table>
+    <thead><tr><th>Name</th><th class="sz">Size</th><th>Actions</th></tr></thead>
+    <tbody>
+    {% if parent is not none %}
+      <tr><td colspan="3"><a href="/files?path={{ parent|urlencode }}">.. (up)</a></td></tr>
+    {% endif %}
+    {% for e in entries %}
+      <tr>
+        <td>{% if e.isdir %}📁 <a href="/files?path={{ e.rel|urlencode }}">{{ e.name }}/</a>
+            {% else %}📄 {{ e.name }}{% endif %}</td>
+        <td class="sz">{{ e.size }}</td>
+        <td>
+          {% if not e.isdir %}<a class="btn" href="/files/download?path={{ e.rel|urlencode }}">Download</a>{% endif %}
+          <form class="inline" method="post" action="/files/delete"
+                onsubmit="return confirm('Delete {{ e.name }}?')">
+            <input type="hidden" name="path" value="{{ e.rel }}">
+            <button class="btn del">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="3">(empty)</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="bar">
+    <form method="post" action="/files/upload" enctype="multipart/form-data" style="display:flex; gap:8px">
+      <input type="hidden" name="path" value="{{ cur }}">
+      <input type="file" name="file">
+      <button class="btn">Upload here</button>
+    </form>
+    <form method="post" action="/files/mkdir" style="display:flex; gap:8px">
+      <input type="hidden" name="path" value="{{ cur }}">
+      <input type="text" name="name" placeholder="new folder" maxlength="64">
+      <button class="btn">Create folder</button>
+    </form>
+  </div>
+</main></body></html>"""
+
+
+@app.route("/files")
+def files():
+    full = _safe(request.args.get("path", ""))
+    if not full or not os.path.isdir(full):
+        return redirect("/files?msg=" + quote("No storage mounted, or not a folder"))
+    cur = _relto_root(full)
+    entries = []
+    try:
+        names = os.listdir(full)
+    except OSError:
+        names = []
+    for name in names:
+        p = os.path.join(full, name)
+        isdir = os.path.isdir(p)
+        try:
+            size = None if isdir else os.path.getsize(p)
+        except OSError:
+            size = None
+        entries.append({"name": name, "isdir": isdir,
+                        "size": "" if isdir else _hsize(size),
+                        "rel": _relto_root(p)})
+    entries.sort(key=lambda e: (not e["isdir"], e["name"].lower()))
+    parent = None if not cur else (os.path.dirname(cur) if os.path.dirname(cur) else "")
+    if cur and parent == "":
+        parent = ""  # up to root
+    if not cur:
+        parent = None
+    crumbs, acc = [], ""
+    for part in [p for p in cur.split("/") if p]:
+        acc = (acc + "/" + part) if acc else part
+        crumbs.append({"name": part, "rel": acc})
+    disk = None
+    try:
+        u = shutil.disk_usage(full)
+        disk = {"used": _hsize(u.used), "total": _hsize(u.total), "free": _hsize(u.free)}
+    except Exception:
+        pass
+    return render_template_string(FILES_PAGE, entries=entries, cur=cur, parent=parent,
+                                  crumbs=crumbs, disk=disk, msg=request.args.get("msg"))
+
+
+@app.route("/files/download")
+def files_download():
+    full = _safe(request.args.get("path", ""))
+    if not full or not os.path.isfile(full):
+        abort(404)
+    return send_file(full, as_attachment=True)
+
+
+@app.route("/files/upload", methods=["POST"])
+def files_upload():
+    cur = request.form.get("path", "")
+    dest = _safe(cur)
+    if not dest or not os.path.isdir(dest):
+        abort(403)
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return redirect("/files?path=" + quote(cur) + "&msg=" + quote("No file selected"))
+    name = os.path.basename(f.filename)
+    try:
+        f.save(os.path.join(dest, name))
+        m = "Uploaded " + name
+    except Exception as e:
+        m = "Upload failed: " + str(e)
+    return redirect("/files?path=" + quote(cur) + "&msg=" + quote(m))
+
+
+@app.route("/files/delete", methods=["POST"])
+def files_delete():
+    full = _safe(request.form.get("path", ""))
+    if not full or full == os.path.realpath(FILES_ROOT):
+        abort(403)
+    parent = os.path.dirname(_relto_root(full))
+    try:
+        if os.path.isdir(full):
+            shutil.rmtree(full)
+        else:
+            os.remove(full)
+    except Exception:
+        pass
+    return redirect("/files?path=" + quote(parent))
+
+
+@app.route("/files/mkdir", methods=["POST"])
+def files_mkdir():
+    cur = request.form.get("path", "")
+    base = _safe(cur)
+    name = os.path.basename((request.form.get("name") or "").strip())
+    if base and name:
+        try:
+            os.makedirs(os.path.join(base, name), exist_ok=True)
+        except Exception:
+            pass
+    return redirect("/files?path=" + quote(cur))
 
 
 @app.route("/healthz")

@@ -54,6 +54,31 @@ separate password. Reach it at `http://<device-tailscale-ip>:8088` (or via
 MagicDNS, `http://<hostname>:8088`). Do not rebind it to `0.0.0.0` without adding
 authentication, as that would expose it to the LAN.
 
+### File explorer (NVMe)
+
+The dashboard includes a file browser (the **files →** link) scoped to a storage
+mount — intended for the Argon V5's NVMe SSD. It lists folders/files with sizes,
+shows total/used/free space, and supports download, upload, create-folder, and
+delete. Access is tailnet-only (same trust model as the rest of the dashboard);
+paths are strictly contained to the mount (no `../` escapes, symlinks resolving
+outside are rejected).
+
+Set up the SSD on the host first (the explorer just browses whatever is mounted):
+
+```bash
+lsblk                                   # find the NVMe (e.g. /dev/nvme0n1) and its size
+sudo mkfs.ext4 /dev/nvme0n1             # ONLY if blank — this erases the disk
+sudo mkdir -p /mnt/nvme
+sudo mount /dev/nvme0n1 /mnt/nvme
+# persist across reboots:
+echo "/dev/nvme0n1  /mnt/nvme  ext4  defaults,nofail  0  2" | sudo tee -a /etc/fstab
+```
+
+The dashboard mounts `/mnt/nvme` into the container as the explorer root (override
+with `NVME_MOUNT=/path` before start). If `lsblk` doesn't show the NVMe on a Pi 5,
+check the FFC cable and that PCIe is enabled (`dtparam=pcie` / Gen-3 via
+`dtparam=pcie_gen=3` in `config.txt`).
+
 ### OLED status display (Argon One V5)
 
 If the Pi is in an Argon One V5 with the OLED module (SSD1306 @ `0x3c`), the
