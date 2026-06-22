@@ -58,12 +58,6 @@ install -m 755 "${SCRIPT_DIR}/tailscale-gateway-autonet.sh" /usr/local/bin/tails
 echo "--> Copying start-tailscale-dashboard.sh to /usr/local/bin/"
 install -m 755 "${SCRIPT_DIR}/start-tailscale-dashboard.sh" /usr/local/bin/start-tailscale-dashboard.sh
 
-echo "--> Copying start-tailscale-media.sh to /usr/local/bin/"
-install -m 755 "${SCRIPT_DIR}/start-tailscale-media.sh" /usr/local/bin/start-tailscale-media.sh
-
-echo "--> Copying start-tailscale-radarr.sh to /usr/local/bin/"
-install -m 755 "${SCRIPT_DIR}/start-tailscale-radarr.sh" /usr/local/bin/start-tailscale-radarr.sh
-
 echo "--> Installing dashboard app to /opt/tailscale-gateway-dashboard/"
 install -d -m 755 /opt/tailscale-gateway-dashboard
 install -m 644 "${SCRIPT_DIR}/dashboard/app.py"          /opt/tailscale-gateway-dashboard/app.py
@@ -99,12 +93,6 @@ install -m 644 "${SCRIPT_DIR}/tailscale-gateway-dashboard.service" /etc/systemd/
 echo "--> Installing systemd unit tailscale-gateway-oled.service"
 install -m 644 "${SCRIPT_DIR}/tailscale-gateway-oled.service" /etc/systemd/system/tailscale-gateway-oled.service
 
-echo "--> Installing systemd unit tailscale-gateway-media.service"
-install -m 644 "${SCRIPT_DIR}/tailscale-gateway-media.service" /etc/systemd/system/tailscale-gateway-media.service
-
-echo "--> Installing systemd unit tailscale-gateway-radarr.service"
-install -m 644 "${SCRIPT_DIR}/tailscale-gateway-radarr.service" /etc/systemd/system/tailscale-gateway-radarr.service
-
 # ── 3. IP forwarding ─────────────────────────────────────────────────────────
 echo "--> Enabling IP forwarding"
 install -m 644 "${SCRIPT_DIR}/99-ip-forward.conf" /etc/sysctl.d/99-ip-forward.conf
@@ -137,21 +125,11 @@ systemctl enable tailscale-gateway.service
 systemctl enable tailscale-gateway-watch.service
 systemctl enable tailscale-gateway-dashboard.service
 systemctl enable tailscale-gateway-oled.service
-systemctl enable tailscale-gateway-media.service
-systemctl enable tailscale-gateway-radarr.service
 
-# The OLED display and media server are independent of the tailnet, so (re)start
-# them now regardless of whether an auth key is present.
+# The OLED display is independent of the tailnet, so (re)start it now regardless
+# of whether an auth key is present.
 echo "--> (Re)starting tailscale-gateway-oled.service"
 systemctl restart tailscale-gateway-oled.service || true
-echo "--> (Re)starting tailscale-gateway-media.service"
-systemctl restart tailscale-gateway-media.service || true
-# Radarr binds to the tailscale IP, so only (re)start it once the tailnet is up
-# (i.e. an auth key is present); otherwise it'll start on next boot.
-if [[ -f /etc/tailscale-gateway/authkey ]]; then
-    echo "--> (Re)starting tailscale-gateway-radarr.service"
-    systemctl restart tailscale-gateway-radarr.service || true
-fi
 
 if [[ -f /etc/tailscale-gateway/authkey ]]; then
     # Use restart (not start) so re-running install.sh after a `git pull`
