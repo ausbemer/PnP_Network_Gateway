@@ -23,8 +23,8 @@ import subprocess
 import threading
 import time
 
-from flask import (Flask, abort, redirect, render_template_string, request,
-                   send_file)
+from flask import (Flask, abort, jsonify, redirect, render_template_string,
+                   request, send_file)
 from urllib.parse import quote
 
 # scapy is only needed for the (optional) device-blocking feature. Import it
@@ -217,6 +217,16 @@ def sys_stats():
     except Exception:
         pass
     s["uptime"] = _fmt_uptime(up) if up is not None else None
+    return s
+
+
+def stats_payload():
+    """sys_stats() plus the human-readable size strings the UI shows."""
+    s = sys_stats()
+    s["mem_str"] = (f"{_hsize(s['mem_used'])} / {_hsize(s['mem_total'])}"
+                    if s.get("mem_total") else "—")
+    s["disk_str"] = (f"{_hsize(s['disk_used'])} / {_hsize(s['disk_total'])}"
+                     if s.get("disk_total") else "—")
     return s
 
 
@@ -448,21 +458,21 @@ PAGE = """<!doctype html>
       <div class="value">{{ devices|length }}</div></div>
   </div>
 
-  <div class="bar"><h2>System</h2></div>
+  <div class="bar"><h2>System <span id="st-live" style="color:#3fb950;font-size:.7rem">● live</span></h2></div>
   <div class="cards">
     <div class="card"><div class="label">CPU temp</div>
-      <div class="value {% if stats.temp_c is not none and stats.temp_c >= 75 %}bad{% elif stats.temp_c is not none %}ok{% endif %}">
+      <div class="value {% if stats.temp_c is not none and stats.temp_c >= 75 %}bad{% elif stats.temp_c is not none %}ok{% endif %}" id="st-temp">
         {% if stats.temp_c is not none %}{{ stats.temp_c }}°C{% else %}—{% endif %}</div></div>
     <div class="card"><div class="label">Fan</div>
-      <div class="value">{% if stats.fan_rpm is none %}—{% elif stats.fan_rpm == 0 %}off{% else %}{{ stats.fan_rpm }} rpm{% endif %}</div></div>
+      <div class="value" id="st-fan">{% if stats.fan_rpm is none %}—{% elif stats.fan_rpm == 0 %}off{% else %}{{ stats.fan_rpm }} rpm{% endif %}</div></div>
     <div class="card"><div class="label">CPU</div>
-      <div class="value">{% if stats.cpu_pct is not none %}{{ stats.cpu_pct }}%{% else %}—{% endif %}{% if stats.load1 %} · ld {{ stats.load1 }}{% endif %}</div></div>
+      <div class="value" id="st-cpu">{% if stats.cpu_pct is not none %}{{ stats.cpu_pct }}%{% else %}—{% endif %}{% if stats.load1 %} · ld {{ stats.load1 }}{% endif %}</div></div>
     <div class="card"><div class="label">Memory</div>
-      <div class="value">{{ stats.mem_str }}{% if stats.mem_pct is not none %} · {{ stats.mem_pct }}%{% endif %}</div></div>
+      <div class="value" id="st-mem">{{ stats.mem_str }}{% if stats.mem_pct is not none %} · {{ stats.mem_pct }}%{% endif %}</div></div>
     <div class="card"><div class="label">Disk (root)</div>
-      <div class="value">{{ stats.disk_str }}{% if stats.disk_pct is not none %} · {{ stats.disk_pct }}%{% endif %}</div></div>
+      <div class="value" id="st-disk">{{ stats.disk_str }}{% if stats.disk_pct is not none %} · {{ stats.disk_pct }}%{% endif %}</div></div>
     <div class="card"><div class="label">Uptime</div>
-      <div class="value">{{ stats.uptime or "—" }}</div></div>
+      <div class="value" id="st-uptime">{{ stats.uptime or "—" }}</div></div>
   </div>
 
   {% if msg %}<div class="notice">{{ msg }}</div>{% endif %}
@@ -542,6 +552,32 @@ PAGE = """<!doctype html>
 </main>
 <footer>Scanned {{ scanned_at }} · arp-scan on {{ info.lan_iface or "—" }} ·
   served on the tailnet only · blocks are manual and clear on restart</footer>
+<script>
+(function(){
+  var T=function(t){return t==null?"—":t+"°C";};
+  var F=function(r){return r==null?"—":(r===0?"off":r+" rpm");};
+  var set=function(id,v){var e=document.getElementById(id);if(e)e.textContent=v;};
+  async function poll(){
+    try{
+      var r=await fetch("/api/stats",{cache:"no-store"});
+      if(!r.ok)return;
+      var s=await r.json();
+      var t=document.getElementById("st-temp");
+      if(t){t.textContent=T(s.temp_c);
+        t.className="value"+(s.temp_c!=null&&s.temp_c>=75?" bad":(s.temp_c!=null?" ok":""));}
+      set("st-fan",F(s.fan_rpm));
+      set("st-cpu",(s.cpu_pct!=null?s.cpu_pct+"%":"—")+(s.load1?" · ld "+s.load1:""));
+      set("st-mem",s.mem_str+(s.mem_pct!=null?" · "+s.mem_pct+"%":""));
+      set("st-disk",s.disk_str+(s.disk_pct!=null?" · "+s.disk_pct+"%":""));
+      set("st-uptime",s.uptime||"—");
+      var l=document.getElementById("st-live");if(l)l.style.color="#3fb950";
+    }catch(e){
+      var l=document.getElementById("st-live");if(l)l.style.color="#f85149";
+    }
+  }
+  setInterval(poll,1000); poll();
+})();
+</script>
 </body></html>"""
 
 
@@ -558,11 +594,7 @@ def index():
     # Link the media server on the SAME host the dashboard was reached on, port 8096
     # (works whether via tailnet IP, MagicDNS, or LAN IP).
     media_host = request.host.split(":")[0]
-    stats = sys_stats()
-    stats["mem_str"] = (f"{_hsize(stats['mem_used'])} / {_hsize(stats['mem_total'])}"
-                        if stats.get("mem_total") else "—")
-    stats["disk_str"] = (f"{_hsize(stats['disk_used'])} / {_hsize(stats['disk_total'])}"
-                         if stats.get("disk_total") else "—")
+    stats = stats_payload()
     return render_template_string(
         PAGE, info=info, devices=devices, scanned_at=scanned_at,
         scapy_ok=SCAPY_OK, blocked_count=len(blocked), stats=stats,
@@ -916,6 +948,12 @@ def files_mkdir():
         except Exception:
             pass
     return redirect("/files?path=" + quote(cur))
+
+
+@app.route("/api/stats")
+def api_stats():
+    """Fast-changing system stats for the 1 Hz dashboard poll (no arp-scan)."""
+    return jsonify(stats_payload())
 
 
 @app.route("/healthz")
