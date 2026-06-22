@@ -64,6 +64,14 @@ def subnets(iface):
     return re.findall(r"(\d+\.\d+\.\d+\.\d+/\d+)", out)
 
 
+def local_ips(iface):
+    """The device's own global IPv4 address(es) — for local SSH."""
+    if not iface:
+        return []
+    out = run(["ip", "-4", "-o", "addr", "show", "dev", iface, "scope", "global"])
+    return re.findall(r"inet (\d+\.\d+\.\d+\.\d+)", out)
+
+
 def internet():
     for hp in (("1.1.1.1", 443), ("8.8.8.8", 443)):
         try:
@@ -76,9 +84,11 @@ def internet():
 
 def standing_pages():
     iface, gw = default_iface_gw()
+    lips = local_ips(iface)
     subs = subnets(iface)
     pages = [[
         socket.gethostname(),
+        "LAN: " + (lips[0] if lips else "(none)"),
         "TS : " + (ts_ip() or "offline"),
         "Net: " + ("up" if internet() else "DOWN"),
     ], [
@@ -86,6 +96,8 @@ def standing_pages():
         gw or "(none)",
         "Iface: " + (iface or "-"),
     ]]
+    if len(lips) > 1:   # multi-homed — show every address you could SSH to
+        pages.append(["This device IPs:"] + lips[:5])
     if subs:
         pages.append(["Subnets (%d):" % len(subs)] + subs[:5])
     return pages
