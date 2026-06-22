@@ -345,6 +345,8 @@ PAGE = """<!doctype html>
 <header>
   <h1>{{ info.hostname }}</h1>
   <div>
+    <a class="refresh" href="http://{{ media_host }}:8096" target="_blank" rel="noopener"
+       style="margin-right:16px">media →</a>
     <a class="refresh" href="/files" style="margin-right:16px">files →</a>
     <a class="refresh" href="/log" style="margin-right:16px">autonet log →</a>
     <span class="ts">{{ info.tailscale_ip or "tailscale: offline" }}</span>
@@ -457,10 +459,13 @@ def index():
         d["blocked"] = d["ip"] in blocked
         d["ipv6"] = has_ipv6_neighbor(d["mac"])
     scanned_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Link the media server on the SAME host the dashboard was reached on, port 8096
+    # (works whether via tailnet IP, MagicDNS, or LAN IP).
+    media_host = request.host.split(":")[0]
     return render_template_string(
         PAGE, info=info, devices=devices, scanned_at=scanned_at,
         scapy_ok=SCAPY_OK, blocked_count=len(blocked),
-        msg=request.args.get("msg"))
+        media_host=media_host, msg=request.args.get("msg"))
 
 
 @app.route("/block", methods=["POST"])

@@ -1,0 +1,16 @@
+[Unit]
+Description=Jellyfin media server (LAN + tailnet)
+After=docker.service network-online.target mnt-nvme.mount
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/start-tailscale-media.sh
+ExecStop=/bin/bash -c 'docker stop tailscale-gateway-media 2>/dev/null || true'
+# First run may pull a few hundred MB.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
