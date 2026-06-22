@@ -13,6 +13,7 @@ password — the tailnet membership is the trust boundary. Do not change the bin
 address to 0.0.0.0 without adding authentication first.
 """
 import datetime
+import glob
 import ipaddress
 import os
 import re
@@ -139,6 +140,84 @@ def net_info():
         "internet": internet_ok(),
         "subnets": subs,
     }
+
+
+def _read_int(path):
+    try:
+        with open(path) as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
+def _fmt_uptime(sec):
+    d, h, m = int(sec // 86400), int((sec % 86400) // 3600), int((sec % 3600) // 60)
+    if d:
+        return f"{d}d {h}h"
+    return f"{h}h {m}m" if h else f"{m}m"
+
+
+def cpu_percent(interval=0.25):
+    """Whole-system CPU busy %, sampled from /proc/stat over a short interval."""
+    def snap():
+        with open("/proc/stat") as f:
+            v = list(map(int, f.readline().split()[1:]))
+        idle = v[3] + (v[4] if len(v) > 4 else 0)
+        return idle, sum(v)
+    try:
+        i1, t1 = snap(); time.sleep(interval); i2, t2 = snap()
+        dt = t2 - t1
+        return round(100 * (1 - (i2 - i1) / dt)) if dt > 0 else None
+    except Exception:
+        return None
+
+
+def sys_stats():
+    s = {}
+    t = _read_int("/sys/class/thermal/thermal_zone0/temp")
+    s["temp_c"] = round(t / 1000, 1) if t is not None else None
+    s["fan_rpm"] = None
+    for p in (glob.glob("/sys/class/hwmon/hwmon*/fan1_input")
+              + glob.glob("/sys/devices/platform/cooling_fan/hwmon/hwmon*/fan1_input")):
+        v = _read_int(p)
+        if v is not None:
+            s["fan_rpm"] = v
+            break
+    try:
+        with open("/proc/loadavg") as f:
+            s["load1"] = f.read().split()[0]
+    except Exception:
+        s["load1"] = None
+    s["cores"] = os.cpu_count()
+    s["cpu_pct"] = cpu_percent()
+    # Memory
+    mi = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, _, rest = line.partition(":")
+                mi[k] = int(rest.split()[0]) * 1024   # kB -> bytes
+        total = mi["MemTotal"]
+        avail = mi.get("MemAvailable", mi.get("MemFree", 0))
+        s["mem_used"], s["mem_total"] = total - avail, total
+        s["mem_pct"] = round((total - avail) * 100 / total) if total else None
+    except Exception:
+        s["mem_total"] = None
+    # Root disk
+    try:
+        du = shutil.disk_usage("/")
+        s["disk_used"], s["disk_total"] = du.used, du.total
+        s["disk_pct"] = round(du.used * 100 / du.total) if du.total else None
+    except Exception:
+        s["disk_total"] = None
+    up = None
+    try:
+        with open("/proc/uptime") as f:
+            up = float(f.read().split()[0])
+    except Exception:
+        pass
+    s["uptime"] = _fmt_uptime(up) if up is not None else None
+    return s
 
 
 def scan_devices(iface, subnets, gateway, my_ips):
@@ -369,6 +448,23 @@ PAGE = """<!doctype html>
       <div class="value">{{ devices|length }}</div></div>
   </div>
 
+  <div class="bar"><h2>System</h2></div>
+  <div class="cards">
+    <div class="card"><div class="label">CPU temp</div>
+      <div class="value {% if stats.temp_c is not none and stats.temp_c >= 75 %}bad{% elif stats.temp_c is not none %}ok{% endif %}">
+        {% if stats.temp_c is not none %}{{ stats.temp_c }}°C{% else %}—{% endif %}</div></div>
+    <div class="card"><div class="label">Fan</div>
+      <div class="value">{% if stats.fan_rpm is none %}—{% elif stats.fan_rpm == 0 %}off{% else %}{{ stats.fan_rpm }} rpm{% endif %}</div></div>
+    <div class="card"><div class="label">CPU</div>
+      <div class="value">{% if stats.cpu_pct is not none %}{{ stats.cpu_pct }}%{% else %}—{% endif %}{% if stats.load1 %} · ld {{ stats.load1 }}{% endif %}</div></div>
+    <div class="card"><div class="label">Memory</div>
+      <div class="value">{{ stats.mem_str }}{% if stats.mem_pct is not none %} · {{ stats.mem_pct }}%{% endif %}</div></div>
+    <div class="card"><div class="label">Disk (root)</div>
+      <div class="value">{{ stats.disk_str }}{% if stats.disk_pct is not none %} · {{ stats.disk_pct }}%{% endif %}</div></div>
+    <div class="card"><div class="label">Uptime</div>
+      <div class="value">{{ stats.uptime or "—" }}</div></div>
+  </div>
+
   {% if msg %}<div class="notice">{{ msg }}</div>{% endif %}
 
   <div class="bar"><h2>OLED message</h2></div>
@@ -462,9 +558,14 @@ def index():
     # Link the media server on the SAME host the dashboard was reached on, port 8096
     # (works whether via tailnet IP, MagicDNS, or LAN IP).
     media_host = request.host.split(":")[0]
+    stats = sys_stats()
+    stats["mem_str"] = (f"{_hsize(stats['mem_used'])} / {_hsize(stats['mem_total'])}"
+                        if stats.get("mem_total") else "—")
+    stats["disk_str"] = (f"{_hsize(stats['disk_used'])} / {_hsize(stats['disk_total'])}"
+                         if stats.get("disk_total") else "—")
     return render_template_string(
         PAGE, info=info, devices=devices, scanned_at=scanned_at,
-        scapy_ok=SCAPY_OK, blocked_count=len(blocked),
+        scapy_ok=SCAPY_OK, blocked_count=len(blocked), stats=stats,
         media_host=media_host, msg=request.args.get("msg"))
 
 
