@@ -94,6 +94,18 @@ real-time transcoding is CPU-only (~one 1080p stream). Keep the library in
 direct-play formats (H.264/AAC MP4) for smooth playback locally and remotely;
 4K/high-bitrate transcoding will struggle.
 
+### Radarr (movie library manager)
+
+Radarr runs as a container (config + library on the NVMe, library shared with
+Jellyfin at `/mnt/nvme/media`). It's bound **tailnet-only** (published on the
+Tailscale interface) like the dashboard, since it's an admin tool — reach it via
+the dashboard's **radarr →** link or `http://<tailscale-ip>:7878`.
+
+This sets up the Radarr **app** only — no indexers or download client are
+configured. Use it to organize/rename a library you legally own (with metadata
+and posters for Jellyfin) or to manage legally-sourced content; wiring it to
+sources is up to you.
+
 ### OLED status display (Argon One V5)
 
 If the Pi is in an Argon One V5 with the OLED module (SSD1306 @ `0x3c`), the

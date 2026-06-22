@@ -436,6 +436,8 @@ PAGE = """<!doctype html>
   <div>
     <a class="refresh" href="http://{{ media_host }}:8096" target="_blank" rel="noopener"
        style="margin-right:16px">media →</a>
+    {% if info.tailscale_ip %}<a class="refresh" href="http://{{ info.tailscale_ip }}:7878"
+       target="_blank" rel="noopener" style="margin-right:16px">radarr →</a>{% endif %}
     <a class="refresh" href="/files" style="margin-right:16px">files →</a>
     <a class="refresh" href="/log" style="margin-right:16px">autonet log →</a>
     <span class="ts">{{ info.tailscale_ip or "tailscale: offline" }}</span>
