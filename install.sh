@@ -47,16 +47,16 @@ echo "==> Installing Tailscale gateway..."
 
 # ── 1. Startup + watcher scripts ──────────────────────────────────────────────
 echo "--> Copying start-tailscale-gateway.sh to /usr/local/bin/"
-install -m 755 "${SCRIPT_DIR}/start-tailscale-gateway.sh" /usr/local/bin/start-tailscale-gateway.sh
+install -m 755 "${SCRIPT_DIR}/gateway/start-tailscale-gateway.sh" /usr/local/bin/start-tailscale-gateway.sh
 
 echo "--> Copying tailscale-gateway-watch.sh to /usr/local/bin/"
-install -m 755 "${SCRIPT_DIR}/tailscale-gateway-watch.sh" /usr/local/bin/tailscale-gateway-watch.sh
+install -m 755 "${SCRIPT_DIR}/watch/tailscale-gateway-watch.sh" /usr/local/bin/tailscale-gateway-watch.sh
 
 echo "--> Copying tailscale-gateway-autonet.sh to /usr/local/bin/"
-install -m 755 "${SCRIPT_DIR}/tailscale-gateway-autonet.sh" /usr/local/bin/tailscale-gateway-autonet.sh
+install -m 755 "${SCRIPT_DIR}/autonet/tailscale-gateway-autonet.sh" /usr/local/bin/tailscale-gateway-autonet.sh
 
 echo "--> Copying start-tailscale-dashboard.sh to /usr/local/bin/"
-install -m 755 "${SCRIPT_DIR}/start-tailscale-dashboard.sh" /usr/local/bin/start-tailscale-dashboard.sh
+install -m 755 "${SCRIPT_DIR}/dashboard/start-tailscale-dashboard.sh" /usr/local/bin/start-tailscale-dashboard.sh
 
 echo "--> Installing dashboard app to /opt/tailscale-gateway-dashboard/"
 install -d -m 755 /opt/tailscale-gateway-dashboard
@@ -79,23 +79,23 @@ fi
 
 # ── 2. Systemd units ──────────────────────────────────────────────────────────
 echo "--> Installing systemd unit tailscale-gateway.service"
-install -m 644 "${SCRIPT_DIR}/tailscale-gateway.service" /etc/systemd/system/tailscale-gateway.service
+install -m 644 "${SCRIPT_DIR}/gateway/tailscale-gateway.service" /etc/systemd/system/tailscale-gateway.service
 
 echo "--> Installing systemd unit tailscale-gateway-watch.service"
-install -m 644 "${SCRIPT_DIR}/tailscale-gateway-watch.service" /etc/systemd/system/tailscale-gateway-watch.service
+install -m 644 "${SCRIPT_DIR}/watch/tailscale-gateway-watch.service" /etc/systemd/system/tailscale-gateway-watch.service
 
 echo "--> Installing systemd unit tailscale-gateway-autonet.service"
-install -m 644 "${SCRIPT_DIR}/tailscale-gateway-autonet.service" /etc/systemd/system/tailscale-gateway-autonet.service
+install -m 644 "${SCRIPT_DIR}/autonet/tailscale-gateway-autonet.service" /etc/systemd/system/tailscale-gateway-autonet.service
 
 echo "--> Installing systemd unit tailscale-gateway-dashboard.service"
-install -m 644 "${SCRIPT_DIR}/tailscale-gateway-dashboard.service" /etc/systemd/system/tailscale-gateway-dashboard.service
+install -m 644 "${SCRIPT_DIR}/dashboard/tailscale-gateway-dashboard.service" /etc/systemd/system/tailscale-gateway-dashboard.service
 
 echo "--> Installing systemd unit tailscale-gateway-oled.service"
-install -m 644 "${SCRIPT_DIR}/tailscale-gateway-oled.service" /etc/systemd/system/tailscale-gateway-oled.service
+install -m 644 "${SCRIPT_DIR}/oled/tailscale-gateway-oled.service" /etc/systemd/system/tailscale-gateway-oled.service
 
 # ── 3. IP forwarding ─────────────────────────────────────────────────────────
 echo "--> Enabling IP forwarding"
-install -m 644 "${SCRIPT_DIR}/99-ip-forward.conf" /etc/sysctl.d/99-ip-forward.conf
+install -m 644 "${SCRIPT_DIR}/gateway/99-ip-forward.conf" /etc/sysctl.d/99-ip-forward.conf
 sysctl -p /etc/sysctl.d/99-ip-forward.conf
 
 # ── 4. Auth key (optional) ────────────────────────────────────────────────────

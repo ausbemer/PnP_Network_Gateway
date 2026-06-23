@@ -107,24 +107,19 @@ pulling the SD card and reading the FAT partition directly (failure).
 
 ## Repository layout
 
-| File | Purpose |
+Each component lives in its own directory with its script(s) and systemd unit:
+
+| Path | Purpose |
 |------|---------|
-| `start-tailscale-gateway.sh`     | Core startup script — detects subnet, runs the container, sets up SNAT. |
-| `tailscale-gateway.service`      | systemd unit; starts after `network-online.target`, retries on failure. |
-| `tailscale-gateway-watch.sh`     | Watches for network changes and restarts the gateway when the subnet changes (hot-swap between LANs). |
-| `tailscale-gateway-watch.service`| systemd unit running the watcher. |
-| `tailscale-gateway-autonet.sh`   | DHCP fallback: sniffs a DHCP-less network, infers subnet/gateway, picks a free IP (with conflict detection), and self-configures. |
-| `tailscale-gateway-autonet.service`| systemd unit running auto-network setup before the gateway. |
-| `oled/`                          | OLED status daemon + `tsg-oled` write helper (Argon One V5 / SSD1306). |
-| `tailscale-gateway-oled.service` | systemd unit running the OLED daemon. |
-| `dashboard/`                     | Flask app + Dockerfile for the tailnet-only status web UI. |
-| `start-tailscale-dashboard.sh`   | Builds (if needed) and runs the dashboard container. |
-| `tailscale-gateway-dashboard.service`| systemd unit running the dashboard. |
-| `99-ip-forward.conf`             | sysctl drop-in enabling IPv4/IPv6 forwarding. |
-| `install.sh`                     | Installs the service onto a running Pi (optionally with a key). |
-| `prepare-image.sh`               | Bakes a Pi into a reusable golden image (Docker + deps + service, no key). |
-| `tailscale-gateway-firstrun.sh`  | `/etc/profile.d` prompt that asks for an auth key on first SSH login. |
-| `BUILD-IMAGE.md`                 | Full walkthrough for building and deploying the custom image. |
+| `gateway/`     | Core subnet router — `start-tailscale-gateway.sh` (detect subnet, run the container, set up SNAT), `tailscale-gateway.service`, and `99-ip-forward.conf` (IP-forwarding sysctl). |
+| `autonet/`     | DHCP-fallback auto-networking — `tailscale-gateway-autonet.sh` (sniff/infer/multi-home a DHCP-less segment) and its unit. |
+| `watch/`       | Hot-swap watcher — `tailscale-gateway-watch.sh` (re-advertise when the network changes) and its unit. |
+| `dashboard/`   | Tailnet-only web UI — `app.py`, `Dockerfile`, `requirements.txt`, `start-tailscale-dashboard.sh`, `tailscale-gateway-dashboard.service`. |
+| `oled/`        | OLED status display — `tailscale-gateway-oled.py`, the `tsg-oled` helper, `tailscale-gateway-oled.service`, and `images/`. |
+| `firstboot/`   | `tailscale-gateway-firstrun.sh` — first-SSH auth-key prompt (installed to `/etc/profile.d`). |
+| `docs/`        | `BUILD-IMAGE.md` and other documentation. |
+| `install.sh`   | Installs/updates all of the above onto a running Pi (optionally with `--authkey`). |
+| `prepare-image.sh` | Bakes a Pi into a reusable golden image (Docker + deps + services, no key). |
 
 ## Quick start (single Pi)
 
@@ -150,7 +145,7 @@ Then approve the advertised route in the
 ## Reusable image (many Pis)
 
 To build one image you can flash onto any number of Pis — each prompting for its
-own auth key on first SSH login — see **[BUILD-IMAGE.md](BUILD-IMAGE.md)**. In
+own auth key on first SSH login — see **[docs/BUILD-IMAGE.md](docs/BUILD-IMAGE.md)**. In
 short: run `prepare-image.sh` on a configured Pi, shut down, then capture and
 shrink the SD card to a `.img`.
 

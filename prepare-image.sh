@@ -87,7 +87,7 @@ docker build -t tailscale-gateway-dashboard:local /opt/tailscale-gateway-dashboa
 
 # ── 4. Install the first-boot auth-key prompt ─────────────────────────────────
 echo "--> Installing first-login auth-key prompt to /etc/profile.d/..."
-install -m 644 "${SCRIPT_DIR}/tailscale-gateway-firstrun.sh" \
+install -m 644 "${SCRIPT_DIR}/firstboot/tailscale-gateway-firstrun.sh" \
     /etc/profile.d/tailscale-gateway-firstrun.sh
 
 # Make sure no stray key is present in the image.
