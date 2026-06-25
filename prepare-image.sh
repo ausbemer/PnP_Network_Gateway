@@ -47,7 +47,10 @@ systemctl enable lldpd 2>/dev/null || true
 
 # ── OLED status display (Argon One V5 / SSD1306) ──────────────────────────────
 echo "--> Installing OLED tooling and enabling I2C..."
-apt-get install -y i2c-tools python3-luma.oled python3-pil
+apt-get install -y i2c-tools python3-luma.oled python3-pil python3-pip
+# apt's smbus2 can be too old for very new Python (the I2C_FUNCS ioctl raises
+# "SystemError: buffer overflow" until smbus2 >= 0.6.1). Ensure a fixed build.
+pip install --break-system-packages -U smbus2 2>/dev/null || true
 # Enable the I2C bus so /dev/i2c-1 exists for the OLED.
 if command -v raspi-config >/dev/null 2>&1; then
     raspi-config nonint do_i2c 0 2>/dev/null || true

@@ -166,7 +166,15 @@ def render_image(device, path):
 
 
 def loop():
-    serial = i2c(port=I2C_PORT, address=I2C_ADDR)
+    # Hand luma our own smbus2 bus so it runs "unmanaged" and writes the
+    # framebuffer in 32-byte chunks. If luma opens the bus itself it uses a 4K
+    # i2c_rdwr transfer, which the Pi 5's RP1 I2C controller rejects (OSError
+    # 121, Remote I/O error). Falls back to luma-managed if smbus2 is missing.
+    try:
+        import smbus2
+        serial = i2c(bus=smbus2.SMBus(I2C_PORT), address=I2C_ADDR)
+    except Exception:
+        serial = i2c(port=I2C_PORT, address=I2C_ADDR)
     device = ssd1306(serial)            # 128x64
     idx = 0
     while True:
