@@ -107,14 +107,35 @@ The dashboard also shows the **autonet log** (the `autonet log →` link), readi
 so you can diagnose a no-DHCP boot either over the tailnet (success) or by
 pulling the SD card and reading the FAT partition directly (failure).
 
-### Network load testing (`tsg-broadcast-ramp`)
+### Network load testing
 
 A bounded test instrument for finding where your network equipment starts to
 react under broadcast load. It sends broadcast ARP frames at a **rate-limited,
-steadily increasing** pace and measures ping latency + packet loss to the gateway
-at each step, so you can see the rate at which storm-control or CPU limits kick
-in. It reports every rate, has a hard pps ceiling, and stops on Ctrl-C — it is a
-measurement tool, not a flood.
+steadily increasing** pace and, at each step, measures the network's reaction so
+you can see the rate at which storm-control or CPU limits kick in. It reports
+every rate, has a hard pps ceiling, and stops on demand — it is a measurement
+tool, not a flood. **Use only on networks you own or are authorized to test.**
+
+**From the dashboard.** The **Network load test** panel runs the ramp and, at
+each step, captures a time series of:
+
+- **target pps** vs **achieved pps** — the gap reveals whether the *Pi* is the
+  bottleneck (the raw-socket sender topping out) rather than the network. If
+  achieved plateaus well below target, you're measuring the sender, not the
+  switch.
+- **latency (avg)**, **jitter** (ping `mdev`), and **packet loss** to **two
+  targets at once**: the **gateway** (same broadcast domain) and an **internet
+  target** (default `1.1.1.1`). A quiet gateway but a struggling internet path
+  points at the gateway's control plane choking on broadcasts; loss/jitter on
+  the gateway points at the local switch.
+
+Every sample is logged to a per-run CSV on the NVMe at
+`/mnt/nvme/loadtest/loadtest-<timestamp>.csv` (browsable/downloadable from the
+file explorer), and the **📈 chart →** link opens a live, auto-refreshing graph
+of pps and the reaction metrics over time. Look for the *knee* — the step where
+latency/jitter/loss inflects is where your equipment starts to struggle.
+
+**From the CLI** (`tsg-broadcast-ramp`, gateway-only metrics):
 
 ```bash
 # preview the ramp plan (sends nothing):
@@ -123,10 +144,6 @@ sudo tsg-broadcast-ramp --dry-run
 # ramp 100 -> 2000 pps in +100 steps, 10s each, logging metrics to CSV:
 sudo tsg-broadcast-ramp --start 100 --max 2000 --step 100 --step-secs 10 --csv ramp.csv
 ```
-
-Watch the `ping_avg_ms` / `loss%` columns climb — the step where they jump is
-where your equipment starts to struggle. **Use only on networks you own or are
-authorized to test.**
 
 ## Repository layout
 

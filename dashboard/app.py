@@ -382,10 +382,20 @@ def blocked_ips():
 
 # ── Broadcast load-test ramp (bounded test instrument) ────────────────────────
 LOADTEST_HARD_CAP = int(os.environ.get("RAMP_HARD_CAP", "200000"))  # absolute pps ceiling
-_loadtest = {"running": False, "pps": 0, "sent": 0, "max": 0,
-             "ping_avg": None, "ping_loss": None, "error": None}
+# Per-run CSV logs land on the NVMe (under the file-explorer root) so they persist
+# and can be downloaded straight from the dashboard.
+LOADTEST_LOG_DIR = os.environ.get("LOADTEST_LOG_DIR", os.path.join(FILES_ROOT, "loadtest"))
+DEFAULT_NET_TARGET = os.environ.get("LOADTEST_NET_TARGET", "1.1.1.1")
+# Live state for the 1 Hz readout (latest sample). The full time series lives in
+# _loadtest_samples and is served to the chart page.
+_loadtest = {"running": False, "pps": 0, "achieved": 0, "sent": 0, "max": 0,
+             "net_target": DEFAULT_NET_TARGET,
+             "gw_avg": None, "gw_jitter": None, "gw_loss": None,
+             "net_avg": None, "net_jitter": None, "net_loss": None,
+             "csv": None, "started": None, "error": None}
 _loadtest_lock = threading.Lock()
 _loadtest_stop = threading.Event()
+_loadtest_samples = []   # current run's time series (list of dicts), for the chart
 
 
 def _mac_bytes(mac):
@@ -405,14 +415,40 @@ def _arp_broadcast(src_mac, src_ip, target_ip):
     return frame + b"\x00" * (60 - len(frame)) if len(frame) < 60 else frame
 
 
-def _loadtest_ping(gw, secs):
-    out = run(["ping", "-n", "-c", str(max(1, secs)), "-i", "1", "-W", "1", gw], timeout=secs + 5)
-    avg = re.search(r"=\s*[\d.]+/([\d.]+)/", out)
+def _ping_full(host, secs):
+    """Ping `host` once/sec for `secs`; return avg/jitter(mdev)/loss."""
+    if not host:
+        return {"avg": None, "jitter": None, "loss": None}
+    out = run(["ping", "-n", "-c", str(max(1, secs)), "-i", "1", "-W", "1", host],
+              timeout=secs + 5)
     loss = re.search(r"(\d+)% packet loss", out)
-    return (float(avg.group(1)) if avg else None, int(loss.group(1)) if loss else None)
+    rtt = re.search(r"=\s*([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)", out)  # min/avg/max/mdev
+    return {"avg": float(rtt.group(2)) if rtt else None,
+            "jitter": float(rtt.group(4)) if rtt else None,
+            "loss": int(loss.group(1)) if loss else None}
 
 
-def _loadtest_run(iface, gw, src_mac, src_ip, start, mx, step, step_secs):
+def _probe_targets(gw, net, secs):
+    """Ping both targets concurrently over the same window (same load)."""
+    res = {}
+
+    def probe(name, host):
+        res[name] = _ping_full(host, secs)
+
+    threads = [threading.Thread(target=probe, args=(n, h))
+               for n, h in (("gw", gw), ("net", net))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return res
+
+
+def _csv_num(v):
+    return "" if v is None else v
+
+
+def _loadtest_run(iface, gw, net, src_mac, src_ip, start, mx, step, step_secs):
     try:
         sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
         sock.bind((iface, 0))
@@ -421,6 +457,24 @@ def _loadtest_run(iface, gw, src_mac, src_ip, start, mx, step, step_secs):
             _loadtest.update(running=False, error=str(e))
         return
     frame = _arp_broadcast(src_mac, src_ip, gw or src_ip)
+
+    # Open a per-run CSV on the NVMe. If the mount is missing we still run; the
+    # series is kept in memory for the chart regardless.
+    csv = None
+    csv_path = None
+    try:
+        os.makedirs(LOADTEST_LOG_DIR, exist_ok=True)
+        csv_path = os.path.join(LOADTEST_LOG_DIR, time.strftime("loadtest-%Y%m%d-%H%M%S.csv"))
+        csv = open(csv_path, "w")
+        csv.write("t_sec,target_pps,achieved_pps,"
+                  "gw_avg_ms,gw_jitter_ms,gw_loss_pct,"
+                  "net_avg_ms,net_jitter_ms,net_loss_pct\n")
+        csv.flush()
+        with _loadtest_lock:
+            _loadtest["csv"] = csv_path
+    except Exception:
+        csv = None
+
     sub = {"pps": 0, "sent": 0}
     sub_stop = threading.Event()
 
@@ -441,34 +495,57 @@ def _loadtest_run(iface, gw, src_mac, src_ip, start, mx, step, step_secs):
 
     t = threading.Thread(target=sender, daemon=True)
     t.start()
+    t0 = time.time()
     try:
         for pps in range(start, mx + 1, step):
             if _loadtest_stop.is_set():
                 break
+            before = sub["sent"]
             sub["pps"] = pps
             with _loadtest_lock:
                 _loadtest.update(pps=pps, sent=sub["sent"])
-            if gw:
-                avg, loss = _loadtest_ping(gw, step_secs)   # samples under load
-            else:
-                for _ in range(step_secs):
-                    if _loadtest_stop.is_set():
-                        break
-                    time.sleep(1)
-                avg = loss = None
+            res = _probe_targets(gw, net, step_secs)   # blocks ~step_secs under load
+            achieved = round((sub["sent"] - before) / max(1, step_secs))
+            g, n = res.get("gw", {}), res.get("net", {})
+            sample = {
+                "t": round(time.time() - t0, 1),
+                "target_pps": pps, "achieved_pps": achieved,
+                "gw_avg": g.get("avg"), "gw_jitter": g.get("jitter"), "gw_loss": g.get("loss"),
+                "net_avg": n.get("avg"), "net_jitter": n.get("jitter"), "net_loss": n.get("loss"),
+            }
+            _loadtest_samples.append(sample)
+            if len(_loadtest_samples) > 5000:
+                del _loadtest_samples[0]
             with _loadtest_lock:
-                _loadtest.update(pps=pps, sent=sub["sent"], ping_avg=avg, ping_loss=loss)
+                _loadtest.update(
+                    pps=pps, achieved=achieved, sent=sub["sent"],
+                    gw_avg=g.get("avg"), gw_jitter=g.get("jitter"), gw_loss=g.get("loss"),
+                    net_avg=n.get("avg"), net_jitter=n.get("jitter"), net_loss=n.get("loss"))
+            if csv:
+                csv.write("{t},{tp},{ap},{ga},{gj},{gl},{na},{nj},{nl}\n".format(
+                    t=sample["t"], tp=pps, ap=achieved,
+                    ga=_csv_num(g.get("avg")), gj=_csv_num(g.get("jitter")), gl=_csv_num(g.get("loss")),
+                    na=_csv_num(n.get("avg")), nj=_csv_num(n.get("jitter")), nl=_csv_num(n.get("loss"))))
+                csv.flush()
+    except Exception as e:
+        with _loadtest_lock:
+            _loadtest["error"] = str(e)
     finally:
         sub_stop.set()
         try:
             sock.close()
         except Exception:
             pass
+        if csv:
+            try:
+                csv.close()
+            except Exception:
+                pass
         with _loadtest_lock:
             _loadtest.update(running=False, pps=0)
 
 
-def start_loadtest(start, mx, step, step_secs):
+def start_loadtest(start, mx, step, step_secs, net=DEFAULT_NET_TARGET):
     with _loadtest_lock:
         if _loadtest.get("running"):
             return False, "already running"
@@ -478,12 +555,17 @@ def start_loadtest(start, mx, step, step_secs):
         return False, "no LAN interface"
     mac, ip = iface_mac(iface), (iface_ipv4(iface) or "0.0.0.0")
     mx = min(mx, LOADTEST_HARD_CAP)
+    net = (net or "").strip() or None
     _loadtest_stop.clear()
+    _loadtest_samples.clear()
     with _loadtest_lock:
-        _loadtest.update(running=True, pps=0, sent=0, max=mx,
-                         ping_avg=None, ping_loss=None, error=None)
+        _loadtest.update(running=True, pps=0, achieved=0, sent=0, max=mx,
+                         net_target=net, csv=None,
+                         started=time.strftime("%Y-%m-%d %H:%M:%S"),
+                         gw_avg=None, gw_jitter=None, gw_loss=None,
+                         net_avg=None, net_jitter=None, net_loss=None, error=None)
     threading.Thread(target=_loadtest_run,
-                     args=(iface, info["gateway"], mac, ip, start, mx, step, step_secs),
+                     args=(iface, info["gateway"], net, mac, ip, start, mx, step, step_secs),
                      daemon=True).start()
     return True, "started"
 
@@ -491,6 +573,111 @@ def start_loadtest(start, mx, step, step_secs):
 def stop_loadtest():
     _loadtest_stop.set()
     return True, "stopping"
+
+
+# Standalone chart page (served raw, not Jinja-rendered) — plots the live series.
+LOADTEST_CHART_PAGE = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Load test — chart</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         margin: 0; background: #0f1419; color: #e6edf3; }
+  header { padding: 18px 24px; border-bottom: 1px solid #222b34;
+           display: flex; justify-content: space-between; align-items: baseline;
+           flex-wrap: wrap; gap: 8px; }
+  header h1 { font-size: 1.15rem; margin: 0; }
+  header a { color: #58a6ff; text-decoration: none; font-size: .85rem; }
+  main { padding: 20px 24px; max-width: 1040px; margin: 0 auto; }
+  .meta { color: #8b949e; font-size: .85rem; margin-bottom: 14px;
+          font-family: ui-monospace, monospace; }
+  .meta .run { color: #f85149; } .meta .idle { color: #3fb950; }
+  .card { background: #161b22; border: 1px solid #222b34; border-radius: 10px;
+          padding: 14px 16px 6px; margin-bottom: 18px; }
+  .card h2 { font-size: .95rem; margin: 0 0 10px; color: #c9d1d9; }
+  canvas { width: 100%; }
+</style></head>
+<body>
+<header>
+  <h1>Network load test — live chart</h1>
+  <a href="/">← back to dashboard</a>
+</header>
+<main>
+  <div class="meta" id="meta">loading…</div>
+  <div class="card"><h2>Offered vs achieved rate &amp; latency</h2>
+    <canvas id="c1" height="150"></canvas></div>
+  <div class="card"><h2>Packet loss &amp; jitter</h2>
+    <canvas id="c2" height="150"></canvas></div>
+</main>
+<script>
+(function(){
+  var GREEN="#3fb950", BLUE="#58a6ff", AMBER="#d29922", RED="#f85149",
+      PURPLE="#bc8cff", CYAN="#39c5cf";
+  function ds(label,color,axis,dash){return {label:label,borderColor:color,
+    backgroundColor:color,yAxisID:axis,borderWidth:2,pointRadius:0,tension:.25,
+    borderDash:dash||[],data:[],spanGaps:true};}
+  function axis(id,pos,title,color){return {type:"linear",position:pos,
+    title:{display:true,text:title,color:color},
+    grid:{color:"rgba(255,255,255,.05)"},ticks:{color:color},
+    beginAtZero:true};}
+  var common={responsive:true,animation:false,interaction:{mode:"index",intersect:false},
+    plugins:{legend:{labels:{color:"#c9d1d9",boxWidth:14}}},
+    scales:{x:{title:{display:true,text:"seconds",color:"#8b949e"},
+      grid:{color:"rgba(255,255,255,.05)"},ticks:{color:"#8b949e",maxTicksLimit:12}}}};
+
+  function clone(o){return JSON.parse(JSON.stringify(o));}
+  var o1=clone(common);
+  o1.scales.pps=axis("pps","left","pps","#c9d1d9");
+  o1.scales.ms=axis("ms","right","latency ms","#8b949e");
+  o1.scales.ms.grid={drawOnChartArea:false};
+  var c1=new Chart(document.getElementById("c1"),{type:"line",data:{labels:[],datasets:[
+    ds("target pps",BLUE,"pps",[6,4]),
+    ds("achieved pps",GREEN,"pps"),
+    ds("gw latency",AMBER,"ms"),
+    ds("net latency",PURPLE,"ms")]},options:o1});
+
+  var o2=clone(common);
+  o2.scales.pct=axis("pct","left","loss %","#c9d1d9"); o2.scales.pct.max=100;
+  o2.scales.ms=axis("ms","right","jitter ms","#8b949e");
+  o2.scales.ms.grid={drawOnChartArea:false};
+  var c2=new Chart(document.getElementById("c2"),{type:"line",data:{labels:[],datasets:[
+    ds("gw loss %",RED,"pct"),
+    ds("net loss %",CYAN,"pct"),
+    ds("gw jitter",AMBER,"ms",[4,3]),
+    ds("net jitter",PURPLE,"ms",[4,3])]},options:o2});
+
+  async function tick(){
+    try{
+      var r=await fetch("/api/loadtest/samples",{cache:"no-store"});
+      if(!r.ok)return;
+      var d=await r.json(), S=d.samples||[];
+      var labels=S.map(function(p){return p.t;});
+      c1.data.labels=labels;
+      c1.data.datasets[0].data=S.map(function(p){return p.target_pps;});
+      c1.data.datasets[1].data=S.map(function(p){return p.achieved_pps;});
+      c1.data.datasets[2].data=S.map(function(p){return p.gw_avg;});
+      c1.data.datasets[3].data=S.map(function(p){return p.net_avg;});
+      c1.update();
+      c2.data.labels=labels;
+      c2.data.datasets[0].data=S.map(function(p){return p.gw_loss;});
+      c2.data.datasets[1].data=S.map(function(p){return p.net_loss;});
+      c2.data.datasets[2].data=S.map(function(p){return p.gw_jitter;});
+      c2.data.datasets[3].data=S.map(function(p){return p.net_jitter;});
+      c2.update();
+      var m=document.getElementById("meta");
+      var state=d.running?'<span class="run">● running</span>':'<span class="idle">○ idle</span>';
+      var csv=d.csv?(" · log: "+d.csv.split("/").pop()):"";
+      m.innerHTML=state+" · net target "+(d.net_target||"-")+" · max "+(d.max||"-")+
+        " pps · "+S.length+" samples"+csv+(d.error?(" · error: "+d.error):"");
+    }catch(e){}
+  }
+  tick(); setInterval(tick,3000);
+})();
+</script>
+</body></html>"""
 
 
 PAGE = """<!doctype html>
@@ -601,7 +788,8 @@ PAGE = """<!doctype html>
     <button class="btn unblock" formaction="/oled-clear">Clear</button>
   </form>
 
-  <div class="bar"><h2>Network load test <span id="lt-state" style="font-size:.7rem;color:#8b949e"></span></h2></div>
+  <div class="bar"><h2>Network load test <span id="lt-state" style="font-size:.7rem;color:#8b949e"></span></h2>
+    <a class="refresh" href="/loadtest/chart" target="_blank" rel="noopener">📈 chart →</a></div>
   <form method="post" action="/loadtest/start"
         onsubmit="return confirm('Start a broadcast load ramp on the LAN? Use only on a network you are authorized to test.')"
         style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:8px">
@@ -613,6 +801,8 @@ PAGE = """<!doctype html>
       <input type="number" name="step" value="100" min="1" style="width:80px"></label>
     <label style="font-size:.82rem; color:#8b949e">sec/step
       <input type="number" name="step_secs" value="10" min="1" style="width:70px"></label>
+    <label style="font-size:.82rem; color:#8b949e">net target
+      <input type="text" name="net_target" value="1.1.1.1" style="width:110px"></label>
     <button class="btn block">Start</button>
     <button class="btn unblock" formaction="/loadtest/stop" formnovalidate>Stop</button>
   </form>
@@ -703,10 +893,14 @@ PAGE = """<!doctype html>
       set("st-uptime",s.uptime||"—");
       var lt=s.loadtest||{};
       var ltlive=document.getElementById("lt-live");
+      var ms=function(v){return v!=null?v+"ms":"-";};
+      var pc=function(v){return v!=null?v+"%":"-";};
       if(ltlive)ltlive.textContent=lt.running
-        ?("load test: RUNNING · "+lt.pps+" pps · sent "+lt.sent+" · ping "
-          +(lt.ping_avg!=null?lt.ping_avg+"ms":"-")+" · loss "
-          +(lt.ping_loss!=null?lt.ping_loss+"%":"-")+" (target max "+lt.max+")")
+        ?("load test: RUNNING · target "+lt.pps+" / achieved "+(lt.achieved!=null?lt.achieved:"-")
+          +" pps · sent "+lt.sent
+          +" · gw "+ms(lt.gw_avg)+"/"+pc(lt.gw_loss)+" jit "+ms(lt.gw_jitter)
+          +" · net["+(lt.net_target||"-")+"] "+ms(lt.net_avg)+"/"+pc(lt.net_loss)+" jit "+ms(lt.net_jitter)
+          +" (max "+lt.max+")")
         :("load test: idle"+(lt.error?(" — error: "+lt.error):""));
       var ltstate=document.getElementById("lt-state");
       if(ltstate){ltstate.textContent=lt.running?"● running":"";ltstate.style.color=lt.running?"#f85149":"#8b949e";}
@@ -1096,7 +1290,8 @@ def loadtest_start():
         secs = max(1, int(request.form.get("step_secs", 10)))
     except ValueError:
         return redirect("/?msg=Bad+load-test+params")
-    ok, why = start_loadtest(s, m, st, secs)
+    net = request.form.get("net_target", DEFAULT_NET_TARGET)
+    ok, why = start_loadtest(s, m, st, secs, net=net)
     return redirect("/?msg=" + quote("Load test " + ("started" if ok else why)))
 
 
@@ -1104,6 +1299,21 @@ def loadtest_start():
 def loadtest_stop():
     stop_loadtest()
     return redirect("/?msg=Load+test+stopping")
+
+
+@app.route("/api/loadtest/samples")
+def api_loadtest_samples():
+    """Current run's full time series, for the chart page."""
+    with _loadtest_lock:
+        meta = {k: _loadtest.get(k) for k in
+                ("running", "max", "net_target", "csv", "started", "error")}
+    meta["samples"] = list(_loadtest_samples)
+    return jsonify(meta)
+
+
+@app.route("/loadtest/chart")
+def loadtest_chart():
+    return LOADTEST_CHART_PAGE
 
 
 @app.route("/api/stats")
