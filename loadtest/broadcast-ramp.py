@@ -26,7 +26,7 @@ import time
 
 # Absolute ceiling so this can't be turned into an unbounded flood. Override with
 # RAMP_HARD_CAP if you genuinely need higher on your own lab gear.
-HARD_CAP_PPS = int(os.environ.get("RAMP_HARD_CAP", "20000"))
+HARD_CAP_PPS = int(os.environ.get("RAMP_HARD_CAP", "200000"))
 
 
 def _run(cmd, timeout=10):
