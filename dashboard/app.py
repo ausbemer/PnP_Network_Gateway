@@ -591,14 +591,16 @@ LOADTEST_CHART_PAGE = """<!doctype html>
            flex-wrap: wrap; gap: 8px; }
   header h1 { font-size: 1.15rem; margin: 0; }
   header a { color: #58a6ff; text-decoration: none; font-size: .85rem; }
-  main { padding: 20px 24px; max-width: 1040px; margin: 0 auto; }
-  .meta { color: #8b949e; font-size: .85rem; margin-bottom: 14px;
+  main { padding: 16px 24px 24px; max-width: 1600px; margin: 0 auto; }
+  .meta { color: #8b949e; font-size: .85rem; margin-bottom: 12px;
           font-family: ui-monospace, monospace; }
   .meta .run { color: #f85149; } .meta .idle { color: #3fb950; }
   .card { background: #161b22; border: 1px solid #222b34; border-radius: 10px;
-          padding: 14px 16px 6px; margin-bottom: 18px; }
-  .card h2 { font-size: .95rem; margin: 0 0 10px; color: #c9d1d9; }
-  canvas { width: 100%; }
+          padding: 12px 16px 14px; margin-bottom: 16px; }
+  .card h2 { font-size: .95rem; margin: 0 0 8px; color: #c9d1d9; }
+  /* Chart fills its box; box height tracks the viewport so both charts share
+     the screen and grow/shrink with the window. */
+  .cv { position: relative; width: 100%; height: 40vh; min-height: 240px; }
 </style></head>
 <body>
 <header>
@@ -608,9 +610,9 @@ LOADTEST_CHART_PAGE = """<!doctype html>
 <main>
   <div class="meta" id="meta">loading…</div>
   <div class="card"><h2>Offered vs achieved rate &amp; latency</h2>
-    <canvas id="c1" height="150"></canvas></div>
+    <div class="cv"><canvas id="c1"></canvas></div></div>
   <div class="card"><h2>Packet loss &amp; jitter</h2>
-    <canvas id="c2" height="150"></canvas></div>
+    <div class="cv"><canvas id="c2"></canvas></div></div>
 </main>
 <script>
 (function(){
@@ -623,7 +625,8 @@ LOADTEST_CHART_PAGE = """<!doctype html>
     title:{display:true,text:title,color:color},
     grid:{color:"rgba(255,255,255,.05)"},ticks:{color:color},
     beginAtZero:true};}
-  var common={responsive:true,animation:false,interaction:{mode:"index",intersect:false},
+  var common={responsive:true,maintainAspectRatio:false,animation:false,
+    interaction:{mode:"index",intersect:false},
     plugins:{legend:{labels:{color:"#c9d1d9",boxWidth:14}}},
     scales:{x:{title:{display:true,text:"seconds",color:"#8b949e"},
       grid:{color:"rgba(255,255,255,.05)"},ticks:{color:"#8b949e",maxTicksLimit:12}}}};
