@@ -28,9 +28,10 @@ PAGE_SECS = float(os.environ.get("OLED_PAGE_SECS", "5"))
 MSG_TTL = float(os.environ.get("OLED_MSG_TTL", "25"))
 LINE_H = 11          # pixels per line; ~5-6 lines on a 128x64 panel
 MAX_COLS = 21        # chars per line at the default font on 128px
-# Drop .png/.bmp/.jpg images here to add them to the rotation. On a Pi this is
-# the FAT boot partition, so you can add images by popping the SD in any computer.
-IMAGE_DIR = os.environ.get("OLED_IMAGE_DIR", "/boot/firmware/oled-images")
+# Images for the rotation live on the NVMe, under the folder the dashboard's
+# file explorer is rooted on — so you upload them straight from the dashboard
+# (files -> oled-images -> Upload). Override with OLED_IMAGE_DIR.
+IMAGE_DIR = os.environ.get("OLED_IMAGE_DIR", "/mnt/nvme/oled-images")
 IMG_THRESHOLD = int(os.environ.get("OLED_IMG_THRESHOLD", "128"))  # 0-255 b/w cutoff
 # Invert all images by default? Per-image override: put "invert" in the filename
 # (e.g. "s-invert.png") to flip just that one — black art on a white background.

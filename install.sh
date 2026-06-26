@@ -68,13 +68,15 @@ echo "--> Copying OLED daemon + tsg-oled helper to /usr/local/bin/"
 install -m 755 "${SCRIPT_DIR}/oled/tailscale-gateway-oled.py" /usr/local/bin/tailscale-gateway-oled.py
 install -m 755 "${SCRIPT_DIR}/oled/tsg-oled" /usr/local/bin/tsg-oled
 
-# Folder for OLED rotation images (drop .png/.bmp/.jpg here). Prefer the FAT boot
-# partition so images can be added by popping the SD into any computer.
-OLED_IMG_DIR="/boot/firmware/oled-images"; [[ -d /boot/firmware ]] || OLED_IMG_DIR="/boot/oled-images"
-install -d -m 755 "${OLED_IMG_DIR}" 2>/dev/null || true
-# If the repo ships any sample images, seed them in.
-if [[ -d "${SCRIPT_DIR}/oled/images" ]]; then
-    cp -n "${SCRIPT_DIR}/oled/images/"* "${OLED_IMG_DIR}/" 2>/dev/null || true
+# Folder for OLED rotation images, on the NVMe so they can be uploaded straight
+# from the dashboard file explorer. Only create it if the NVMe is mounted (else
+# it'd land on the SD card); the dashboard's "Create folder" can also make it.
+OLED_IMG_DIR="${OLED_IMAGE_DIR:-/mnt/nvme/oled-images}"
+if mountpoint -q /mnt/nvme 2>/dev/null; then
+    install -d -m 755 "${OLED_IMG_DIR}" 2>/dev/null || true
+    if [[ -d "${SCRIPT_DIR}/oled/images" ]]; then
+        cp -n "${SCRIPT_DIR}/oled/images/"* "${OLED_IMG_DIR}/" 2>/dev/null || true
+    fi
 fi
 
 # ── 2. Systemd units ──────────────────────────────────────────────────────────
