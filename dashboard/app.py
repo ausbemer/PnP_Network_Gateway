@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -227,6 +228,8 @@ def stats_payload():
                     if s.get("mem_total") else "—")
     s["disk_str"] = (f"{_hsize(s['disk_used'])} / {_hsize(s['disk_total'])}"
                      if s.get("disk_total") else "—")
+    with _loadtest_lock:
+        s["loadtest"] = dict(_loadtest)
     return s
 
 
@@ -377,6 +380,119 @@ def blocked_ips():
         return set(_blocks.keys())
 
 
+# ── Broadcast load-test ramp (bounded test instrument) ────────────────────────
+LOADTEST_HARD_CAP = int(os.environ.get("RAMP_HARD_CAP", "20000"))  # absolute pps ceiling
+_loadtest = {"running": False, "pps": 0, "sent": 0, "max": 0,
+             "ping_avg": None, "ping_loss": None, "error": None}
+_loadtest_lock = threading.Lock()
+_loadtest_stop = threading.Event()
+
+
+def _mac_bytes(mac):
+    return bytes(int(x, 16) for x in mac.split(":"))
+
+
+def _ip_bytes(ip):
+    return bytes(int(x) for x in ip.split("."))
+
+
+def _arp_broadcast(src_mac, src_ip, target_ip):
+    eth = b"\xff\xff\xff\xff\xff\xff" + _mac_bytes(src_mac) + struct.pack("!H", 0x0806)
+    arp = struct.pack("!HHBBH", 1, 0x0800, 6, 4, 1)
+    arp += _mac_bytes(src_mac) + _ip_bytes(src_ip)
+    arp += b"\x00" * 6 + _ip_bytes(target_ip)
+    frame = eth + arp
+    return frame + b"\x00" * (60 - len(frame)) if len(frame) < 60 else frame
+
+
+def _loadtest_ping(gw, secs):
+    out = run(["ping", "-n", "-c", str(max(1, secs)), "-i", "1", "-W", "1", gw], timeout=secs + 5)
+    avg = re.search(r"=\s*[\d.]+/([\d.]+)/", out)
+    loss = re.search(r"(\d+)% packet loss", out)
+    return (float(avg.group(1)) if avg else None, int(loss.group(1)) if loss else None)
+
+
+def _loadtest_run(iface, gw, src_mac, src_ip, start, mx, step, step_secs):
+    try:
+        sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+        sock.bind((iface, 0))
+    except Exception as e:
+        with _loadtest_lock:
+            _loadtest.update(running=False, error=str(e))
+        return
+    frame = _arp_broadcast(src_mac, src_ip, gw or src_ip)
+    sub = {"pps": 0, "sent": 0}
+    sub_stop = threading.Event()
+
+    def sender():
+        while not sub_stop.is_set():
+            pps = sub["pps"]
+            if pps <= 0:
+                time.sleep(0.05); continue
+            batch = max(1, pps // 100)
+            try:
+                for _ in range(batch):
+                    sock.send(frame); sub["sent"] += 1
+            except OSError:
+                pass
+            with _loadtest_lock:               # publish live so the readout climbs
+                _loadtest["sent"] = sub["sent"]
+            time.sleep(batch / pps)
+
+    t = threading.Thread(target=sender, daemon=True)
+    t.start()
+    try:
+        for pps in range(start, mx + 1, step):
+            if _loadtest_stop.is_set():
+                break
+            sub["pps"] = pps
+            with _loadtest_lock:
+                _loadtest.update(pps=pps, sent=sub["sent"])
+            if gw:
+                avg, loss = _loadtest_ping(gw, step_secs)   # samples under load
+            else:
+                for _ in range(step_secs):
+                    if _loadtest_stop.is_set():
+                        break
+                    time.sleep(1)
+                avg = loss = None
+            with _loadtest_lock:
+                _loadtest.update(pps=pps, sent=sub["sent"], ping_avg=avg, ping_loss=loss)
+    finally:
+        sub_stop.set()
+        try:
+            sock.close()
+        except Exception:
+            pass
+        with _loadtest_lock:
+            _loadtest.update(running=False, pps=0)
+
+
+def start_loadtest(start, mx, step, step_secs):
+    with _loadtest_lock:
+        if _loadtest.get("running"):
+            return False, "already running"
+    info = net_info()
+    iface = info["lan_iface"]
+    if not iface:
+        return False, "no LAN interface"
+    mac, ip = iface_mac(iface), (iface_ipv4(iface) or "0.0.0.0")
+    mx = min(mx, LOADTEST_HARD_CAP)
+    _loadtest_stop.clear()
+    with _loadtest_lock:
+        _loadtest.update(running=True, pps=0, sent=0, max=mx,
+                         ping_avg=None, ping_loss=None, error=None)
+    threading.Thread(target=_loadtest_run,
+                     args=(iface, info["gateway"], mac, ip, start, mx, step, step_secs),
+                     daemon=True).start()
+    return True, "started"
+
+
+def stop_loadtest():
+    _loadtest_stop.set()
+    return True, "stopping"
+
+
 PAGE = """<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -485,6 +601,23 @@ PAGE = """<!doctype html>
     <button class="btn unblock" formaction="/oled-clear">Clear</button>
   </form>
 
+  <div class="bar"><h2>Network load test <span id="lt-state" style="font-size:.7rem;color:#8b949e"></span></h2></div>
+  <form method="post" action="/loadtest/start"
+        onsubmit="return confirm('Start a broadcast load ramp on the LAN? Use only on a network you are authorized to test.')"
+        style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:8px">
+    <label style="font-size:.82rem; color:#8b949e">start
+      <input type="number" name="start" value="100" min="1" style="width:80px"></label>
+    <label style="font-size:.82rem; color:#8b949e">max
+      <input type="number" name="max" value="1000" min="1" style="width:90px"></label>
+    <label style="font-size:.82rem; color:#8b949e">step
+      <input type="number" name="step" value="100" min="1" style="width:80px"></label>
+    <label style="font-size:.82rem; color:#8b949e">sec/step
+      <input type="number" name="step_secs" value="10" min="1" style="width:70px"></label>
+    <button class="btn block">Start</button>
+    <button class="btn unblock" formaction="/loadtest/stop" formnovalidate>Stop</button>
+  </form>
+  <div class="du" id="lt-live">load test: idle</div>
+
   <div class="bar">
     <h2>Subnets{% if info.subnets|length > 1 %} · multi-homed across {{ info.subnets|length }}{% endif %}</h2>
   </div>
@@ -568,6 +701,15 @@ PAGE = """<!doctype html>
       set("st-mem",s.mem_str+(s.mem_pct!=null?" · "+s.mem_pct+"%":""));
       set("st-disk",s.disk_str+(s.disk_pct!=null?" · "+s.disk_pct+"%":""));
       set("st-uptime",s.uptime||"—");
+      var lt=s.loadtest||{};
+      var ltlive=document.getElementById("lt-live");
+      if(ltlive)ltlive.textContent=lt.running
+        ?("load test: RUNNING · "+lt.pps+" pps · sent "+lt.sent+" · ping "
+          +(lt.ping_avg!=null?lt.ping_avg+"ms":"-")+" · loss "
+          +(lt.ping_loss!=null?lt.ping_loss+"%":"-")+" (target max "+lt.max+")")
+        :("load test: idle"+(lt.error?(" — error: "+lt.error):""));
+      var ltstate=document.getElementById("lt-state");
+      if(ltstate){ltstate.textContent=lt.running?"● running":"";ltstate.style.color=lt.running?"#f85149":"#8b949e";}
       var l=document.getElementById("st-live");if(l)l.style.color="#3fb950";
     }catch(e){
       var l=document.getElementById("st-live");if(l)l.style.color="#f85149";
@@ -943,6 +1085,25 @@ def files_mkdir():
         except Exception:
             pass
     return redirect("/files?path=" + quote(cur))
+
+
+@app.route("/loadtest/start", methods=["POST"])
+def loadtest_start():
+    try:
+        s = max(1, int(request.form.get("start", 100)))
+        m = max(1, int(request.form.get("max", 1000)))
+        st = max(1, int(request.form.get("step", 100)))
+        secs = max(1, int(request.form.get("step_secs", 10)))
+    except ValueError:
+        return redirect("/?msg=Bad+load-test+params")
+    ok, why = start_loadtest(s, m, st, secs)
+    return redirect("/?msg=" + quote("Load test " + ("started" if ok else why)))
+
+
+@app.route("/loadtest/stop", methods=["POST"])
+def loadtest_stop():
+    stop_loadtest()
+    return redirect("/?msg=Load+test+stopping")
 
 
 @app.route("/api/stats")

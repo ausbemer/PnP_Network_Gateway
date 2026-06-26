@@ -68,6 +68,12 @@ echo "--> Copying OLED daemon + tsg-oled helper to /usr/local/bin/"
 install -m 755 "${SCRIPT_DIR}/oled/tailscale-gateway-oled.py" /usr/local/bin/tailscale-gateway-oled.py
 install -m 755 "${SCRIPT_DIR}/oled/tsg-oled" /usr/local/bin/tsg-oled
 
+# Broadcast load-ramp test instrument (manual tool — no service, never auto-runs).
+if [[ -f "${SCRIPT_DIR}/loadtest/broadcast-ramp.py" ]]; then
+    echo "--> Copying broadcast-ramp test tool to /usr/local/bin/tsg-broadcast-ramp"
+    install -m 755 "${SCRIPT_DIR}/loadtest/broadcast-ramp.py" /usr/local/bin/tsg-broadcast-ramp
+fi
+
 # Folder for OLED rotation images, on the NVMe so they can be uploaded straight
 # from the dashboard file explorer. Only create it if the NVMe is mounted (else
 # it'd land on the SD card); the dashboard's "Create folder" can also make it.

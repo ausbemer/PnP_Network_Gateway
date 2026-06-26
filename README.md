@@ -107,6 +107,27 @@ The dashboard also shows the **autonet log** (the `autonet log →` link), readi
 so you can diagnose a no-DHCP boot either over the tailnet (success) or by
 pulling the SD card and reading the FAT partition directly (failure).
 
+### Network load testing (`tsg-broadcast-ramp`)
+
+A bounded test instrument for finding where your network equipment starts to
+react under broadcast load. It sends broadcast ARP frames at a **rate-limited,
+steadily increasing** pace and measures ping latency + packet loss to the gateway
+at each step, so you can see the rate at which storm-control or CPU limits kick
+in. It reports every rate, has a hard pps ceiling, and stops on Ctrl-C — it is a
+measurement tool, not a flood.
+
+```bash
+# preview the ramp plan (sends nothing):
+sudo tsg-broadcast-ramp --dry-run
+
+# ramp 100 -> 2000 pps in +100 steps, 10s each, logging metrics to CSV:
+sudo tsg-broadcast-ramp --start 100 --max 2000 --step 100 --step-secs 10 --csv ramp.csv
+```
+
+Watch the `ping_avg_ms` / `loss%` columns climb — the step where they jump is
+where your equipment starts to struggle. **Use only on networks you own or are
+authorized to test.**
+
 ## Repository layout
 
 Each component lives in its own directory with its script(s) and systemd unit:
@@ -119,6 +140,7 @@ Each component lives in its own directory with its script(s) and systemd unit:
 | `dashboard/`   | Tailnet-only web UI — `app.py`, `Dockerfile`, `requirements.txt`, `start-tailscale-dashboard.sh`, `tailscale-gateway-dashboard.service`. |
 | `oled/`        | OLED status display — `tailscale-gateway-oled.py`, the `tsg-oled` helper, `tailscale-gateway-oled.service`, and `images/`. |
 | `firstboot/`   | `tailscale-gateway-firstrun.sh` — first-SSH auth-key prompt (installed to `/etc/profile.d`). |
+| `loadtest/`    | `broadcast-ramp.py` — bounded broadcast load-ramp test tool (installed as `tsg-broadcast-ramp`; manual, no service). |
 | `docs/`        | `BUILD-IMAGE.md` and other documentation. |
 | `install.sh`   | Installs/updates all of the above onto a running Pi (optionally with `--authkey`). |
 | `prepare-image.sh` | Bakes a Pi into a reusable golden image (Docker + deps + services, no key). |
