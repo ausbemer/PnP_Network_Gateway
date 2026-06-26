@@ -381,7 +381,7 @@ def blocked_ips():
 
 
 # ── Broadcast load-test ramp (bounded test instrument) ────────────────────────
-LOADTEST_HARD_CAP = int(os.environ.get("RAMP_HARD_CAP", "20000"))  # absolute pps ceiling
+LOADTEST_HARD_CAP = int(os.environ.get("RAMP_HARD_CAP", "200000"))  # absolute pps ceiling
 _loadtest = {"running": False, "pps": 0, "sent": 0, "max": 0,
              "ping_avg": None, "ping_loss": None, "error": None}
 _loadtest_lock = threading.Lock()
