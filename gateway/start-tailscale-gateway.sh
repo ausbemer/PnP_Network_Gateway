@@ -52,6 +52,34 @@ if [[ -z "${TS_AUTHKEY:-}" ]]; then
     fi
 fi
 
+# ── 2b. Tags + key options (for OAuth client secrets) ─────────────────────────
+# Tags give an OAuth-registered node its owner/identity (required, since an OAuth
+# client is not a user). Optional key options (ephemeral / preauthorized) are
+# appended to the secret as ?k=v. Both are written by install.sh; either may be
+# absent, in which case we leave Tailscale's defaults alone.
+TAGS_FILE="/etc/tailscale-gateway/tags"
+KEYOPTS_FILE="/etc/tailscale-gateway/keyopts"
+TS_TAGS=""
+[[ -f "${TAGS_FILE}" ]] && TS_TAGS=$(tr -d '[:space:]' < "${TAGS_FILE}")
+
+# OAuth client secrets cannot register an untagged node — fail clearly if so.
+if [[ "${TS_AUTHKEY}" == tskey-client-* && -z "${TS_TAGS}" ]]; then
+    echo "ERROR: this is an OAuth client secret but no tags are set." >&2
+    echo "       Re-run install.sh with --tags, e.g. --tags tag:auto-gateway," >&2
+    echo "       or write the tag to ${TAGS_FILE}." >&2
+    exit 1
+fi
+
+# Append key options to the secret if provided and it has no query string yet.
+if [[ -f "${KEYOPTS_FILE}" && "${TS_AUTHKEY}" != *\?* ]]; then
+    KEYOPTS=$(tr -d '[:space:]' < "${KEYOPTS_FILE}")
+    [[ -n "${KEYOPTS}" ]] && TS_AUTHKEY="${TS_AUTHKEY}?${KEYOPTS}"
+fi
+
+# Assemble extra `tailscale up` args (advertise-tags) for the container.
+TS_EXTRA_ARGS=""
+[[ -n "${TS_TAGS}" ]] && TS_EXTRA_ARGS="--advertise-tags=${TS_TAGS}"
+
 # ── 3. Ensure the state volume exists ─────────────────────────────────────────
 
 docker volume inspect "${STATE_VOLUME}" &>/dev/null \
@@ -79,6 +107,7 @@ docker run -d \
     -v /dev/net/tun:/dev/net/tun \
     -e TS_AUTHKEY="${TS_AUTHKEY}" \
     -e TS_ROUTES="${SUBNET}" \
+    -e TS_EXTRA_ARGS="${TS_EXTRA_ARGS}" \
     -e TS_USERSPACE=false \
     -e TS_STATE_DIR=/var/lib/tailscale \
     tailscale/tailscale:latest

@@ -14,12 +14,37 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AUTHKEY=""
+TAGS=""
+EPHEMERAL=""     # unset → leave Tailscale's default; otherwise true|false
+PREAUTH=""       # unset → leave Tailscale's default; otherwise true|false
 
 # ── Parse args ────────────────────────────────────────────────────────────────
+#   --authkey <key>          Tailscale auth key, or an OAuth client secret
+#                            (tskey-client-...). Written to .../authkey.
+#   --tags tag:a,tag:b       Advertise these ACL tags. REQUIRED for OAuth client
+#                            secrets (they have no user owner, so the node must be
+#                            tagged); optional for normal auth keys.
+#   --ephemeral true|false   Override the node's ephemeral setting. Only meaningful
+#                            for OAuth secrets (which default to ephemeral=true).
+#                            Omit to leave Tailscale's default untouched.
+#   --preauth true|false     Override device pre-authorization. Omit to leave the
+#                            default (OAuth defaults preauthorized=false).
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --authkey)
             AUTHKEY="$2"
+            shift 2
+            ;;
+        --tags)
+            TAGS="$2"
+            shift 2
+            ;;
+        --ephemeral)
+            EPHEMERAL="$2"
+            shift 2
+            ;;
+        --preauth|--preauthorized)
+            PREAUTH="$2"
             shift 2
             ;;
         *)
@@ -28,6 +53,22 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Validate the optional booleans.
+for pair in "ephemeral:${EPHEMERAL}" "preauth:${PREAUTH}"; do
+    name="${pair%%:*}"; val="${pair#*:}"
+    if [[ -n "${val}" && "${val}" != "true" && "${val}" != "false" ]]; then
+        echo "ERROR: --${name} must be 'true' or 'false' (got '${val}')." >&2
+        exit 1
+    fi
+done
+
+# OAuth client secrets have no user owner, so a tag is mandatory.
+if [[ "${AUTHKEY}" == tskey-client-* && -z "${TAGS}" ]]; then
+    echo "ERROR: --tags is required when --authkey is an OAuth client secret" >&2
+    echo "       (tskey-client-...). Example: --tags tag:auto-gateway" >&2
+    exit 1
+fi
 
 # ── Require root ──────────────────────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
@@ -123,6 +164,26 @@ else
         echo "          sudo chmod 600 /etc/tailscale-gateway/authkey"
         echo ""
     fi
+fi
+
+# Tags to advertise (mandatory for OAuth, harmless otherwise). The start script
+# turns a non-empty tags file into --advertise-tags.
+if [[ -n "${TAGS}" ]]; then
+    echo "--> Writing advertise tags to /etc/tailscale-gateway/tags (${TAGS})"
+    echo "${TAGS}" > /etc/tailscale-gateway/tags
+    chmod 600 /etc/tailscale-gateway/tags
+fi
+
+# Optional key options (ephemeral / preauthorized). Only the flags you passed are
+# written; an empty/absent file leaves Tailscale's defaults untouched. The start
+# script appends these as ?key=val to the auth key (OAuth secrets only).
+KEYOPTS=""
+[[ -n "${EPHEMERAL}" ]] && KEYOPTS="ephemeral=${EPHEMERAL}"
+[[ -n "${PREAUTH}" ]] && KEYOPTS="${KEYOPTS:+${KEYOPTS}&}preauthorized=${PREAUTH}"
+if [[ -n "${KEYOPTS}" ]]; then
+    echo "--> Writing key options to /etc/tailscale-gateway/keyopts (${KEYOPTS})"
+    echo "${KEYOPTS}" > /etc/tailscale-gateway/keyopts
+    chmod 600 /etc/tailscale-gateway/keyopts
 fi
 
 # ── 5. Enable and start the services ─────────────────────────────────────────

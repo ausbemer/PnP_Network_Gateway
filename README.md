@@ -183,6 +183,37 @@ Then approve the advertised route in the
 [Tailscale admin console](https://login.tailscale.com/admin/machines), or set
 `autoApprovers` in your ACL policy to skip that step.
 
+### Using an OAuth client (Trust Credential) instead of an auth key
+
+For a fleet, an OAuth client secret is nicer than a static key: one secret works
+for every Pi, and the nodes come up tagged and non-expiring. Create the client in
+the Tailscale admin console with the **minimum scope: `Auth Keys` → Write** (the
+`Devices`/Core scope is *not* needed — that's for the API), and assign it a tag
+(e.g. `tag:auto-gateway`).
+
+Why a tag is mandatory for OAuth: the **key authorizes the device to join**, but
+every node also needs an **owner/identity inside the tailnet** — that's the tag,
+and it's what your ACL rules and `autoApprovers` are written against. A normal
+auth key is owned by the user who made it; an OAuth client has no user, so the
+node must be tagged instead. Pass it explicitly (nothing is hardcoded):
+
+```bash
+sudo bash install.sh --authkey tskey-client-XXXXXXXX --tags tag:auto-gateway
+```
+
+`--tags` is **required** for OAuth secrets (`tskey-client-…`) and optional
+otherwise. Two opt-in flags control key properties; omit them to leave
+Tailscale's defaults:
+
+| Flag | Effect | Note |
+|------|--------|------|
+| `--ephemeral true\|false` | sets the node's ephemeral flag | OAuth defaults this to **true** — for an always-on gateway you usually want `false`, or the node is auto-removed minutes after a reboot |
+| `--preauth true\|false` | skip manual device approval | OAuth defaults to `false`; set `true` for hands-off bring-up if device approval is on |
+
+Your ACL policy needs a matching `tagOwners` entry (e.g.
+`"tag:auto-gateway": ["autogroup:admin"]`) and, for hands-off routing, an
+`autoApprovers` entry for the advertised subnets referencing that tag.
+
 ## Reusable image (many Pis)
 
 To build one image you can flash onto any number of Pis — each prompting for its
